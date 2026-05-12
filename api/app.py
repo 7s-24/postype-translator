@@ -150,6 +150,12 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
+    def do_GET(self):
+    self._send_json(200, {
+        "ok": True,
+        "message": "Postype translator API is running. Use POST /api/translate."
+    })
+    
     def do_OPTIONS(self):
         self._send_json(200, {"ok": True})
 
