@@ -394,7 +394,7 @@
         <span>篇章术语确认</span>
         <span class="count" id="terms-count">0 条</span>
       </div>
-      <p class="terms-hint">以下术语由 AI 从原文中提取并与全局术语库合并。翻译时将严格遵守此表。</p>
+      <p class="terms-hint">全局术语库条目优先级最高，不会被篇章提取覆盖。以下仅展示篇章中新发现的补充术语，请检查后开始翻译。</p>
       <div class="g-table-wrap" style="max-height:320px">
         <table class="g-table">
           <thead><tr>
@@ -615,8 +615,10 @@ function addTermRow()  {
 function showTermsReview(global, article) {
   const seen = new Set();
   mergedGlossary = [];
-  for (const t of article) { if (!t.ko) continue; seen.add(t.ko); mergedGlossary.push({...t, _src:"article"}); }
-  for (const t of global)  { if (!t.ko||seen.has(t.ko)) continue; seen.add(t.ko); mergedGlossary.push({...t, _src:"global"}); }
+  // 全局术语库优先级最高，不可被篇章提取覆盖
+  for (const t of global)  { if (!t.ko) continue; seen.add(t.ko); mergedGlossary.push({...t, _src:"global"}); }
+  // 篇章提取的术语仅补充全局库中没有的
+  for (const t of article) { if (!t.ko||seen.has(t.ko)) continue; seen.add(t.ko); mergedGlossary.push({...t, _src:"article"}); }
   renderTermsTable();
   $("terms-review").classList.add("active");
 }
