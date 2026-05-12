@@ -135,6 +135,15 @@
       display: none;
     }
     .error.active { display: block; }
+    .notice {
+      border: 1px solid #0a6;
+      padding: 12px 14px;
+      margin-bottom: 24px;
+      color: #084;
+      background: #f4fffb;
+      display: none;
+    }
+    .notice.active { display: block; }
     @media (max-width: 560px) {
       .wrap { padding: 32px 16px 64px; }
       .actions { flex-direction: column; }
@@ -151,12 +160,18 @@
       <input id="url" type="url" placeholder="https://..." autocomplete="off" />
     </div>
 
+    <div class="field">
+      <label for="file-html">或上传 Postype HTML</label>
+      <input id="file-html" type="file" accept=".html,.htm" />
+    </div>
+
     <div class="actions">
       <button id="btn-translate" type="button">翻译</button>
       <button id="btn-download" class="secondary" type="button">导出 TXT</button>
     </div>
 
     <div id="error" class="error" role="alert"></div>
+    <div id="notice" class="notice" role="status"></div>
 
     <div id="progress" class="panel" aria-live="polite">
       <div class="panel-head">
@@ -196,7 +211,31 @@
     function setBusy(busy) {
       $("btn-translate").disabled = busy;
       $("btn-download").disabled = busy;
+      $("file-html").disabled = busy;
       $("btn-translate").textContent = busy ? "翻译中…" : "翻译";
+    }
+
+    function readFileAsText(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error("读取 HTML 文件失败。"));
+        reader.readAsText(file, "utf-8");
+      });
+    }
+
+    function showNotice(msg) {
+      const n = $("notice");
+      n.textContent = msg;
+      n.classList.add("active");
+    }
+
+    function clearNotice() {
+      $("notice").classList.remove("active");
+    }
+
+    function containsKorean(text) {
+      return /[\u3131-\u318E\uAC00-\uD7A3]/.test(text);
     }
 
     async function postJSON(body) {
@@ -214,19 +253,30 @@
 
     async function translatePost() {
       const url = $("url").value.trim();
-      if (!url) {
-        showError("请输入 URL");
+      const fileInput = $("file-html");
+      const file = fileInput.files && fileInput.files[0];
+      if (!url && !file) {
+        showError("请输入 URL 或上传 Postype HTML 文件");
         return;
       }
 
       clearError();
+      clearNotice();
       $("output").value = "";
       $("progress").classList.add("active");
       setBusy(true);
 
       try {
         setProgress("抓取原文", 0, 1);
-        const prep = await postJSON({ action: "prepare", url });
+        let prep;
+
+        if (file) {
+          const html = await readFileAsText(file);
+          prep = await postJSON({ action: "prepare", html });
+        } else {
+          prep = await postJSON({ action: "prepare", url });
+        }
+
         const chunks = prep.chunks || [];
         const total = chunks.length;
 
@@ -252,6 +302,22 @@
         }
 
         setProgress("完成", total, total);
+
+        let text = $("output").value;
+        if (containsKorean(text)) {
+          showNotice("检测到译文中仍包含韩文残留，正在尝试自动修正...");
+          const fixData = await postJSON({ action: "fix", translated_text: text });
+          if (fixData.fixed_text) {
+            text = fixData.fixed_text;
+            $("output").value = text;
+          }
+
+          if (containsKorean(text)) {
+            showNotice("修正已尝试，但仍检测到韩文字符，请手动检查未翻译部分。");
+          } else {
+            showNotice("已自动修正剩余韩文字符，请检查译文是否完整。");
+          }
+        }
       } catch (err) {
         showError(err.message || String(err));
         $("progress-label").textContent = "失败";
