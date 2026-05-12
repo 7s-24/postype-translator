@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Postype Translator</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 16px; }
+    input, button, textarea { width: 100%; box-sizing: border-box; font-size: 16px; }
+    input, textarea { padding: 10px; margin: 8px 0 16px; }
+    button { padding: 12px; cursor: pointer; }
+    textarea { height: 520px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Postype Translator</h1>
+
+  <input id="url" placeholder="Postype URL" />
+  <button onclick="translatePost()">翻译</button>
+  <button onclick="downloadTranslation()">导出 TXT</button>
+
+  <p id="status"></p>
+  <textarea id="output" placeholder="译文会显示在这里"></textarea>
+
+  <script>
+    async function translatePost() {
+      const url = document.getElementById("url").value.trim();
+      const status = document.getElementById("status");
+      const output = document.getElementById("output");
+
+      status.textContent = "翻译中……";
+      output.value = "";
+
+      try {
+        const res = await fetch("/api/translate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url })
+        });
+
+        const data = await res.json();
+
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "请求失败");
+        }
+
+        status.textContent = `完成，共 ${data.chunks} 段`;
+        output.value = data.translated;
+      } catch (err) {
+        status.textContent = "失败：" + err.message;
+      }
+    }
+
+    function downloadTranslation() {
+      const output = document.getElementById("output");
+      const text = output.value.trim();
+
+      if (!text) {
+        alert("请先翻译文本，再导出。");
+        return;
+      }
+
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+
+      a.href = url;
+      a.download = "translated.txt";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+  </script>
+</body>
+</html>

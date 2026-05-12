@@ -3,10 +3,6 @@
     {
       "source": "/api/translate",
       "destination": "/api/app.py"
-    },
-    {
-      "source": "/",
-      "destination": "/public/index.html"
     }
   ]
 }
