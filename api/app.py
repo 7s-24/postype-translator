@@ -68,7 +68,7 @@ FIX_SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责修正已
 """
 
 
-def parse_postype_html(html: str, section_id: str = "post-section") -> str:
+def parse_postype_html(html: str, section_id: str = "post-content") -> str:
     soup = BeautifulSoup(html, "lxml")
     content = soup.find(id=section_id)
 
