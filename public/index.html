@@ -16,6 +16,7 @@
 
   <input id="url" placeholder="Postype URL" />
   <button onclick="translatePost()">翻译</button>
+  <button onclick="downloadTranslation()">导出 TXT</button>
 
   <p id="status"></p>
   <textarea id="output" placeholder="译文会显示在这里"></textarea>
@@ -47,6 +48,27 @@
       } catch (err) {
         status.textContent = "失败：" + err.message;
       }
+    }
+
+    function downloadTranslation() {
+      const output = document.getElementById("output");
+      const text = output.value.trim();
+
+      if (!text) {
+        alert("请先翻译文本，再导出。");
+        return;
+      }
+
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+
+      a.href = url;
+      a.download = "translated.txt";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     }
   </script>
 </body>
