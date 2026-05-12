@@ -166,11 +166,143 @@
       color: #111;
       border-bottom-color: #111;
     }
-    .tab-content {
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* ---- glossary ---- */
+    .glossary-section { margin-bottom: 24px; }
+    .glossary-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 0;
+      border: none;
+      border-bottom: 1px solid #ddd;
+      background: none;
+      cursor: pointer;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #111;
+      width: 100%;
+      text-align: left;
+    }
+    .glossary-toggle:hover { color: #444; }
+    .glossary-toggle .arrow {
+      display: inline-block;
+      transition: transform 0.15s;
+      font-size: 10px;
+    }
+    .glossary-toggle.open .arrow { transform: rotate(90deg); }
+    .glossary-body { display: none; padding: 16px 0 0; }
+    .glossary-body.open { display: block; }
+    .glossary-toolbar {
+      display: flex;
+      gap: 0;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .glossary-toolbar button { padding: 8px 14px; font-size: 12px; }
+    .g-table-wrap {
+      max-height: 400px;
+      overflow-y: auto;
+      border: 1px solid #ddd;
+      margin-bottom: 12px;
+    }
+    .g-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .g-table th {
+      position: sticky;
+      top: 0;
+      background: #f5f5f5;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid #ddd;
+      z-index: 1;
+    }
+    .g-table td {
+      padding: 4px 6px;
+      border-bottom: 1px solid #eee;
+      vertical-align: middle;
+    }
+    .g-table input {
+      width: 100%;
+      padding: 6px 8px;
+      font: inherit;
+      font-size: 13px;
+      border: 1px solid #ddd;
+      border-radius: 0;
+      background: #fff;
+      outline: none;
+    }
+    .g-table input:focus { border-color: #111; }
+    .g-table select {
+      width: 100%;
+      padding: 6px 4px;
+      font: inherit;
+      font-size: 12px;
+      border: 1px solid #ddd;
+      border-radius: 0;
+      background: #fff;
+      outline: none;
+    }
+    .g-table .col-ko  { width: 28%; }
+    .g-table .col-zh  { width: 28%; }
+    .g-table .col-cat { width: 22%; }
+    .g-table .col-src { width: 12%; }
+    .g-table .col-del { width: 10%; text-align: center; }
+    .btn-del {
+      padding: 4px 10px;
+      font-size: 12px;
+      background: #fff;
+      color: #c00;
+      border: 1px solid #c00;
+      cursor: pointer;
+    }
+    .btn-del:hover { background: #c00; color: #fff; }
+    .source-tag {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      padding: 2px 6px;
+      border: 1px solid;
+    }
+    .source-tag.global  { color: #555; border-color: #bbb; }
+    .source-tag.article { color: #07a; border-color: #07a; }
+
+    /* ---- terms review panel ---- */
+    #terms-review {
+      border: 1px solid #111;
+      padding: 16px;
+      margin-bottom: 24px;
+      background: #fafafa;
       display: none;
     }
-    .tab-content.active {
-      display: block;
+    #terms-review.active { display: block; }
+    #terms-review .panel-head { margin-bottom: 12px; }
+    .terms-hint {
+      font-size: 13px;
+      color: #555;
+      margin: 0 0 12px;
+    }
+    .terms-actions {
+      display: flex;
+      gap: 0;
+      margin-top: 12px;
+    }
+    .terms-actions button {
+      padding: 10px 20px;
+      font-size: 14px;
     }
   </style>
 </head>
@@ -178,6 +310,7 @@
   <div class="wrap">
     <h1>Postype Translator</h1>
 
+    <!-- Input Tabs -->
     <div class="tabs">
       <button class="tab active" data-tab="url">URL</button>
       <button class="tab" data-tab="manual">手动输入</button>
@@ -190,14 +323,12 @@
         <input id="url" type="url" placeholder="https://..." autocomplete="off" />
       </div>
     </div>
-
     <div id="manual-tab" class="tab-content">
       <div class="field">
         <label for="manual-html">韩文正文</label>
         <textarea id="manual-html" placeholder="粘贴韩文小说正文"></textarea>
       </div>
     </div>
-
     <div id="file-tab" class="tab-content">
       <div class="field">
         <label for="file-html">Postype HTML 或 WebArchive</label>
@@ -205,6 +336,35 @@
       </div>
     </div>
 
+    <!-- Global Glossary -->
+    <div class="glossary-section">
+      <button class="glossary-toggle" id="glossary-toggle" type="button">
+        <span class="arrow">▶</span>
+        <span>全局术语库 (<span id="glossary-count">0</span> 条)</span>
+      </button>
+      <div class="glossary-body" id="glossary-body">
+        <div class="glossary-toolbar">
+          <button type="button" onclick="addGlossaryRow()">+ 添加</button>
+          <button type="button" class="secondary" onclick="exportGlossary()">导出</button>
+          <button type="button" class="secondary" onclick="$('import-file').click()">导入</button>
+          <button type="button" class="secondary" onclick="resetGlossary()">恢复默认</button>
+        </div>
+        <div class="g-table-wrap">
+          <table class="g-table">
+            <thead><tr>
+              <th class="col-ko">韩文</th>
+              <th class="col-zh">中文</th>
+              <th class="col-cat">类别</th>
+              <th class="col-del"></th>
+            </tr></thead>
+            <tbody id="glossary-tbody"></tbody>
+          </table>
+        </div>
+        <input type="file" id="import-file" accept=".json" style="display:none" />
+      </div>
+    </div>
+
+    <!-- Action Buttons -->
     <div class="actions">
       <button id="btn-translate" type="button">翻译</button>
       <button id="btn-download" class="secondary" type="button">导出 TXT</button>
@@ -213,6 +373,35 @@
     <div id="error" class="error" role="alert"></div>
     <div id="notice" class="notice" role="status"></div>
 
+    <!-- Article Terms Review -->
+    <div id="terms-review">
+      <div class="panel-head">
+        <span>篇章术语确认</span>
+        <span class="count" id="terms-count">0 条</span>
+      </div>
+      <p class="terms-hint">以下术语由 AI 从原文中提取并与全局术语库合并。翻译时将严格遵守此表，请检查后开始翻译。</p>
+      <div class="g-table-wrap" style="max-height:320px">
+        <table class="g-table">
+          <thead><tr>
+            <th class="col-ko">韩文</th>
+            <th class="col-zh">中文</th>
+            <th class="col-cat">类别</th>
+            <th class="col-src">来源</th>
+            <th class="col-del"></th>
+          </tr></thead>
+          <tbody id="terms-tbody"></tbody>
+        </table>
+      </div>
+      <div style="margin-top:8px">
+        <button type="button" onclick="addTermRow()" style="padding:6px 12px;font-size:12px">+ 添加术语</button>
+      </div>
+      <div class="terms-actions">
+        <button type="button" id="btn-confirm-translate">确认并翻译</button>
+        <button type="button" class="secondary" id="btn-skip-translate">跳过术语，直接翻译</button>
+      </div>
+    </div>
+
+    <!-- Progress -->
     <div id="progress" class="panel" aria-live="polite">
       <div class="panel-head">
         <span id="progress-label">准备中</span>
@@ -221,239 +410,392 @@
       <div class="bar"><div id="progress-fill" class="bar-fill"></div></div>
     </div>
 
+    <!-- Output -->
     <div class="field">
       <label for="output">译文</label>
       <textarea id="output" placeholder="译文会显示在这里"></textarea>
     </div>
   </div>
 
-  <script>
-    const $ = (id) => document.getElementById(id);
+<script>
+const $ = (id) => document.getElementById(id);
+const CATEGORIES = ["人名","地名","技能","称号","物品","组织","称呼","艺名","本名","其他"];
+const STORAGE_KEY = "postype_global_glossary";
 
-    function setProgress(label, done, total) {
-      $("progress-label").textContent = label;
-      $("progress-done").textContent = String(done);
-      $("progress-total").textContent = String(total);
-      const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
-      $("progress-fill").style.width = pct + "%";
+const DEFAULT_GLOSSARY = [
+  { ko: "신유",   zh: "申惟",   category: "艺名" },
+  { ko: "도훈",   zh: "道勋",   category: "艺名" },
+  { ko: "영재",   zh: "英宰",   category: "艺名" },
+  { ko: "한진",   zh: "韩振",   category: "艺名" },
+  { ko: "지훈",   zh: "志薰",   category: "艺名" },
+  { ko: "경민",   zh: "炅潣",   category: "艺名" },
+  { ko: "신정환", zh: "申正焕", category: "本名" },
+  { ko: "김도훈", zh: "金道勋", category: "本名" },
+  { ko: "최영재", zh: "崔英宰", category: "本名" },
+  { ko: "한지훈", zh: "韩志薰", category: "本名" },
+  { ko: "이경민", zh: "李炅潣", category: "本名" },
+  { ko: "형",     zh: "哥",     category: "称呼" },
+  { ko: "선배",   zh: "前辈",   category: "称呼" },
+  { ko: "후배",   zh: "后辈",   category: "称呼" },
+  { ko: "막내",   zh: "忙内",   category: "称呼" },
+];
+
+// ── Utility ──────────────────────────────────────────────
+function esc(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;");
+}
+function containsKorean(t) { return /[\u3131-\u318E\uAC00-\uD7A3]/.test(t); }
+
+function setProgress(label, done, total) {
+  $("progress-label").textContent = label;
+  $("progress-done").textContent = done;
+  $("progress-total").textContent = total;
+  $("progress-fill").style.width = (total > 0 ? Math.min(100, Math.round(done/total*100)) : 0) + "%";
+}
+function showError(msg)  { const e=$("error"); e.textContent="错误："+msg; e.classList.add("active"); }
+function clearError()    { $("error").classList.remove("active"); }
+function showNotice(msg) { const n=$("notice"); n.textContent=msg; n.classList.add("active"); }
+function clearNotice()   { $("notice").classList.remove("active"); }
+
+function setBusy(busy) {
+  $("btn-translate").disabled = busy;
+  $("btn-download").disabled = busy;
+  $("file-html").disabled = busy;
+  $("manual-html").disabled = busy;
+  $("url").disabled = busy;
+  $("btn-translate").textContent = busy ? "处理中…" : "翻译";
+}
+
+function readFile(file) {
+  return new Promise((resolve, reject) => {
+    if (file.name.toLowerCase().endsWith(".webarchive")) {
+      const r = new FileReader();
+      r.onload = () => {
+        const u8 = new Uint8Array(r.result);
+        let bin = "";
+        for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+        resolve({ type: "webarchive", content: btoa(bin) });
+      };
+      r.onerror = () => reject(new Error("读取 WebArchive 失败"));
+      r.readAsArrayBuffer(file);
+    } else {
+      const r = new FileReader();
+      r.onload = () => resolve({ type: "html", content: r.result });
+      r.onerror = () => reject(new Error("读取文件失败"));
+      r.readAsText(file, "utf-8");
     }
+  });
+}
 
-    function showError(msg) {
-      const e = $("error");
-      e.textContent = "错误：" + msg;
-      e.classList.add("active");
-    }
+async function postJSON(body) {
+  const res = await fetch("/api/translate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) throw new Error(data.error || `请求失败 (HTTP ${res.status})`);
+  return data;
+}
 
-    function clearError() {
-      $("error").classList.remove("active");
-    }
+// ── Category select HTML ─────────────────────────────────
+function catOptions(sel) {
+  return CATEGORIES.map(c => `<option value="${c}"${c===sel?" selected":""}>${c}</option>`).join("");
+}
 
-    function setBusy(busy) {
-      $("btn-translate").disabled = busy;
-      $("btn-download").disabled = busy;
-      $("file-html").disabled = busy;
-      $("manual-html").disabled = busy;
-      $("btn-translate").textContent = busy ? "翻译中…" : "翻译";
-    }
+// ══════════════════════════════════════════════════════════
+//  GLOBAL GLOSSARY
+// ══════════════════════════════════════════════════════════
+function loadGlossary()   { try { const r=localStorage.getItem(STORAGE_KEY); if(r) return JSON.parse(r); } catch{} return null; }
+function saveGlossary(arr) { localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); $("glossary-count").textContent=arr.length; }
+function getGlossary()    { return loadGlossary() || [...DEFAULT_GLOSSARY]; }
 
-    function readFileAsText(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = () => reject(new Error("读取 HTML 文件失败。"));
-        reader.readAsText(file, "utf-8");
-      });
-    }
-
-    function readFile(file) {
-      return new Promise((resolve, reject) => {
-        if (file.name.toLowerCase().endsWith('.webarchive')) {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const arrayBuffer = reader.result;
-            const uint8Array = new Uint8Array(arrayBuffer);
-            let binaryString = '';
-            for (let i = 0; i < uint8Array.length; i++) {
-              binaryString += String.fromCharCode(uint8Array[i]);
-            }
-            const base64 = btoa(binaryString);
-            resolve({ type: 'webarchive', content: base64 });
-          };
-          reader.onerror = () => reject(new Error("读取 WebArchive 文件失败。"));
-          reader.readAsArrayBuffer(file);
-        } else {
-          const reader = new FileReader();
-          reader.onload = () => resolve({ type: 'html', content: reader.result });
-          reader.onerror = () => reject(new Error("读取 HTML 文件失败。"));
-          reader.readAsText(file, "utf-8");
-        }
-      });
-    }
-
-    function showNotice(msg) {
-      const n = $("notice");
-      n.textContent = msg;
-      n.classList.add("active");
-    }
-
-    function clearNotice() {
-      $("notice").classList.remove("active");
-    }
-
-    function containsKorean(text) {
-      return /[\u3131-\u318E\uAC00-\uD7A3]/.test(text);
-    }
-
-    async function postJSON(body) {
-      const res = await fetch("/api/translate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.error) {
-        throw new Error(data.error || `请求失败 (HTTP ${res.status})`);
-      }
-      return data;
-    }
-
-    async function translatePost() {
-      const url = $("url").value.trim();
-      const manualHtml = $("manual-html").value.trim();
-      const fileInput = $("file-html");
-      const file = fileInput.files && fileInput.files[0];
-      if (!url && !manualHtml && !file) {
-        showError("请输入 URL、手动输入韩文正文 或上传文件");
-        return;
-      }
-
-      // Check file size to prevent HTTP 413
-      if (file && file.size > 3 * 1024 * 1024) { // 3MB limit
-        showError("文件太大，请选择小于 3MB 的文件");
-        return;
-      }
-
-      clearError();
-      clearNotice();
-      $("output").value = "";
-      $("progress").classList.add("active");
-      setBusy(true);
-
-      try {
-        setProgress("抓取原文", 0, 1);
-        let prep;
-
-        if (file) {
-          const fileData = await readFile(file);
-          setProgress("解析文件内容", 0, 1);
-          prep = await postJSON({ action: "prepare", fileData });
-        } else if (manualHtml) {
-          setProgress("处理输入文本", 0, 1);
-          prep = await postJSON({ action: "prepare", text: manualHtml });
-        } else {
-          setProgress("获取网页内容", 0, 1);
-          prep = await postJSON({ action: "prepare", url });
-        }
-
-        const chunks = prep.chunks || [];
-        const total = chunks.length;
-
-        if (total === 0) {
-          throw new Error("正文为空");
-        }
-
-        setProgress("翻译中", 0, total);
-        const parts = [];
-        const fallbackChunks = [];
-
-        for (let i = 0; i < total; i++) {
-          const previous = parts.length ? parts[parts.length - 1] : "";
-          setProgress(`翻译第 ${i + 1}/${total} 段`, i, total);
-          const data = await postJSON({
-            action: "translate",
-            chunk: chunks[i],
-            index: i + 1,
-            total,
-            previous,
-          });
-          parts.push(data.translated || "");
-          if (data.fallback) {
-            fallbackChunks.push(i + 1);
-          }
-          $("output").value = parts.join("\n\n");
-          setProgress("翻译中", i + 1, total);
-        }
-
-        setProgress("完成", total, total);
-
-        if (fallbackChunks.length > 0) {
-          showNotice(`第 ${fallbackChunks.join(", ")} 段使用了备选翻译（机械翻译）`);
-        }
-
-        let text = $("output").value;
-        if (containsKorean(text)) {
-          setProgress("修正韩文残留", total, total);
-          showNotice("检测到译文中仍包含韩文残留，正在尝试自动修正...");
-          const fixData = await postJSON({ action: "fix", translated_text: text });
-          if (fixData.fixed_text) {
-            text = fixData.fixed_text;
-            $("output").value = text;
-          }
-
-          if (containsKorean(text)) {
-            showNotice("修正已尝试，但仍检测到韩文字符，请手动检查未翻译部分。");
-          } else {
-            showNotice("已自动修正剩余韩文字符，请检查译文是否完整。");
-          }
-        }
-      } catch (err) {
-        showError(err.message || String(err));
-        $("progress-label").textContent = "失败";
-      } finally {
-        setBusy(false);
-      }
-    }
-
-    function downloadTranslation() {
-      const text = $("output").value.trim();
-      if (!text) {
-        showError("请先翻译，再导出。");
-        return;
-      }
-      clearError();
-      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-      const link = document.createElement("a");
-      const objUrl = URL.createObjectURL(blob);
-      link.href = objUrl;
-      link.download = "translated.txt";
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(objUrl);
-    }
-
-    function switchTab(tabName) {
-      // Hide all tabs
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-      
-      // Show selected tab
-      document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
-      document.getElementById(`${tabName}-tab`).classList.add('active');
-    }
-
-    // Tab event listeners
-    document.querySelectorAll('.tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        switchTab(tab.dataset.tab);
-      });
+function renderGlossaryTable() {
+  const items = getGlossary();
+  const tbody = $("glossary-tbody");
+  tbody.innerHTML = items.map((it, i) => `
+    <tr data-idx="${i}">
+      <td><input value="${esc(it.ko)}" data-field="ko" /></td>
+      <td><input value="${esc(it.zh)}" data-field="zh" /></td>
+      <td><select data-field="category">${catOptions(it.category)}</select></td>
+      <td style="text-align:center"><button class="btn-del" onclick="delGlossaryRow(${i})">✕</button></td>
+    </tr>`).join("");
+  $("glossary-count").textContent = items.length;
+  tbody.querySelectorAll("input,select").forEach(el => {
+    el.addEventListener("change", () => {
+      const idx = +el.closest("tr").dataset.idx;
+      const arr = getGlossary();
+      arr[idx][el.dataset.field] = el.value;
+      saveGlossary(arr);
     });
+  });
+}
 
-    $("btn-translate").addEventListener("click", translatePost);
-    $("btn-download").addEventListener("click", downloadTranslation);
-    $("url").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") translatePost();
+function addGlossaryRow() {
+  const arr = getGlossary();
+  arr.push({ ko:"", zh:"", category:"其他" });
+  saveGlossary(arr);
+  renderGlossaryTable();
+  const wrap = $("glossary-body").querySelector(".g-table-wrap");
+  wrap.scrollTop = wrap.scrollHeight;
+}
+function delGlossaryRow(i) {
+  const arr = getGlossary(); arr.splice(i,1); saveGlossary(arr); renderGlossaryTable();
+}
+
+function exportGlossary() {
+  const blob = new Blob([JSON.stringify(getGlossary(), null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "glossary.json";
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+
+$("import-file").addEventListener("change", async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const arr = JSON.parse(await f.text());
+    if (!Array.isArray(arr)) throw new Error("格式错误");
+    const valid = arr.filter(t => t && typeof t.ko === "string" && typeof t.zh === "string");
+    valid.forEach(t => { if (!t.category) t.category = "其他"; });
+    saveGlossary(valid);
+    renderGlossaryTable();
+  } catch(err) { showError("导入失败：" + err.message); }
+  e.target.value = "";
+});
+
+function resetGlossary() {
+  if (!confirm("确定恢复为默认术语库？")) return;
+  saveGlossary([...DEFAULT_GLOSSARY]);
+  renderGlossaryTable();
+}
+
+$("glossary-toggle").addEventListener("click", () => {
+  $("glossary-toggle").classList.toggle("open");
+  $("glossary-body").classList.toggle("open");
+});
+
+// ══════════════════════════════════════════════════════════
+//  ARTICLE TERMS REVIEW
+// ══════════════════════════════════════════════════════════
+let pendingChunks = [];
+let mergedGlossary = [];
+
+function renderTermsTable() {
+  const tbody = $("terms-tbody");
+  tbody.innerHTML = mergedGlossary.map((it, i) => `
+    <tr data-idx="${i}">
+      <td><input value="${esc(it.ko)}" data-field="ko" /></td>
+      <td><input value="${esc(it.zh)}" data-field="zh" /></td>
+      <td><select data-field="category">${catOptions(it.category)}</select></td>
+      <td><span class="source-tag ${it._src||"article"}">${it._src==="global"?"全局":"提取"}</span></td>
+      <td style="text-align:center"><button class="btn-del" onclick="delTermRow(${i})">✕</button></td>
+    </tr>`).join("");
+  $("terms-count").textContent = mergedGlossary.length + " 条";
+  tbody.querySelectorAll("input,select").forEach(el => {
+    el.addEventListener("change", () => {
+      mergedGlossary[+el.closest("tr").dataset.idx][el.dataset.field] = el.value;
     });
-  </script>
+  });
+}
+
+function delTermRow(i) { mergedGlossary.splice(i,1); renderTermsTable(); }
+function addTermRow()  {
+  mergedGlossary.push({ ko:"", zh:"", category:"其他", _src:"article" });
+  renderTermsTable();
+  const wrap = $("terms-review").querySelector(".g-table-wrap");
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+function showTermsReview(globalTerms, articleTerms) {
+  const seen = new Set();
+  mergedGlossary = [];
+  // Article terms first (higher priority)
+  for (const t of articleTerms) {
+    if (!t.ko) continue;
+    seen.add(t.ko);
+    mergedGlossary.push({ ...t, _src: "article" });
+  }
+  // Then global terms that don't conflict
+  for (const t of globalTerms) {
+    if (!t.ko || seen.has(t.ko)) continue;
+    seen.add(t.ko);
+    mergedGlossary.push({ ...t, _src: "global" });
+  }
+  renderTermsTable();
+  $("terms-review").classList.add("active");
+}
+function hideTermsReview() { $("terms-review").classList.remove("active"); }
+
+// ══════════════════════════════════════════════════════════
+//  MAIN FLOW
+// ══════════════════════════════════════════════════════════
+
+// Phase 1: Prepare + Extract
+async function prepareAndExtract() {
+  const url = $("url").value.trim();
+  const manual = $("manual-html").value.trim();
+  const fileInput = $("file-html");
+  const file = fileInput.files && fileInput.files[0];
+
+  if (!url && !manual && !file) {
+    showError("请输入 URL、手动粘贴正文或上传文件");
+    return;
+  }
+  if (file && file.size > 3*1024*1024) {
+    showError("文件太大，请选择小于 3 MB 的文件");
+    return;
+  }
+
+  clearError(); clearNotice(); hideTermsReview();
+  $("output").value = "";
+  $("progress").classList.add("active");
+  setBusy(true);
+
+  try {
+    // 1) Prepare → chunks
+    let prep;
+    if (file) {
+      setProgress("解析文件", 0, 1);
+      const fd = await readFile(file);
+      prep = await postJSON({ action: "prepare", fileData: fd });
+    } else if (manual) {
+      setProgress("处理文本", 0, 1);
+      prep = await postJSON({ action: "prepare", text: manual });
+    } else {
+      setProgress("获取网页", 0, 1);
+      prep = await postJSON({ action: "prepare", url });
+    }
+
+    const chunks = prep.chunks || [];
+    if (!chunks.length) throw new Error("正文为空");
+    pendingChunks = chunks;
+
+    // 2) Extract terms
+    setProgress("提取术语", 0, 1);
+    const fullText = chunks.join("\n\n");
+    const ext = await postJSON({ action: "extract_terms", text: fullText });
+    const articleTerms = ext.terms || [];
+
+    $("progress").classList.remove("active");
+    setBusy(false);
+
+    // 3) Show review
+    showTermsReview(getGlossary(), articleTerms);
+    showNotice(
+      articleTerms.length
+        ? `从原文中提取了 ${articleTerms.length} 条术语，请确认后开始翻译。`
+        : "未检测到新术语，将使用全局术语库。请确认后开始翻译。"
+    );
+  } catch (err) {
+    showError(err.message || String(err));
+    $("progress-label").textContent = "失败";
+    setBusy(false);
+  }
+}
+
+// Phase 2: Translate
+async function translateWithGlossary(glossary) {
+  hideTermsReview();
+  clearError(); clearNotice();
+  $("output").value = "";
+  $("progress").classList.add("active");
+  setBusy(true);
+
+  const chunks = pendingChunks;
+  const total = chunks.length;
+  const clean = glossary.filter(g => g.ko && g.zh).map(g => ({ ko: g.ko, zh: g.zh, category: g.category }));
+
+  try {
+    setProgress("翻译中", 0, total);
+    const parts = [];
+    const fallbackList = [];
+
+    for (let i = 0; i < total; i++) {
+      const prev = parts.length ? parts[parts.length - 1] : "";
+      setProgress(`翻译第 ${i+1}/${total} 段`, i, total);
+      const data = await postJSON({
+        action: "translate",
+        chunk: chunks[i],
+        index: i + 1,
+        total,
+        previous: prev,
+        glossary: clean,
+      });
+      parts.push(data.translated || "");
+      if (data.fallback) fallbackList.push(i + 1);
+      $("output").value = parts.join("\n\n");
+      setProgress("翻译中", i + 1, total);
+    }
+
+    setProgress("完成", total, total);
+
+    if (fallbackList.length) {
+      showNotice(`第 ${fallbackList.join(", ")} 段使用了备选翻译（机械翻译 + 术语替换）`);
+    }
+
+    // Fix Korean residue
+    let text = $("output").value;
+    if (containsKorean(text)) {
+      setProgress("修正韩文残留", total, total);
+      showNotice("检测到韩文残留，正在自动修正…");
+      const fix = await postJSON({ action: "fix", translated_text: text });
+      if (fix.fixed_text) { text = fix.fixed_text; $("output").value = text; }
+      showNotice(
+        containsKorean(text)
+          ? "修正已尝试，仍检测到韩文字符，请手动检查。"
+          : "已自动修正韩文残留，请检查译文。"
+      );
+    }
+  } catch (err) {
+    showError(err.message || String(err));
+    $("progress-label").textContent = "失败";
+  } finally {
+    setBusy(false);
+  }
+}
+
+// ── Event Listeners ──────────────────────────────────────
+
+$("btn-translate").addEventListener("click", prepareAndExtract);
+
+$("btn-confirm-translate").addEventListener("click", () => {
+  translateWithGlossary(mergedGlossary);
+});
+
+$("btn-skip-translate").addEventListener("click", () => {
+  translateWithGlossary(getGlossary().map(g => ({ ...g, _src: "global" })));
+});
+
+$("btn-download").addEventListener("click", () => {
+  const text = $("output").value.trim();
+  if (!text) { showError("请先翻译，再导出。"); return; }
+  clearError();
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "translated.txt";
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+});
+
+$("url").addEventListener("keydown", e => { if (e.key === "Enter") prepareAndExtract(); });
+
+// Tabs
+function switchTab(name) {
+  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+  document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
+  document.querySelector(`[data-tab="${name}"]`).classList.add("active");
+  $(`${name}-tab`).classList.add("active");
+}
+document.querySelectorAll(".tab").forEach(t => {
+  t.addEventListener("click", () => switchTab(t.dataset.tab));
+});
+
+// ── Init ─────────────────────────────────────────────────
+if (!loadGlossary()) saveGlossary([...DEFAULT_GLOSSARY]);
+renderGlossaryTable();
+</script>
 </body>
 </html>
