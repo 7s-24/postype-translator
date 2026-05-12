@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 
 MODEL = "qwen-plus-2025-07-28"
 MAX_CHARS = 3000
@@ -126,7 +127,53 @@ def split_text(text: str, max_chars: int = MAX_CHARS):
     return chunks
 
 
-def translate_chunk(client, chunk, index, total, previous_translation=""):
+def translate_by_google(text: str) -> str:
+    """使用 Google Translate 进行机械翻译（备选方案）"""
+    try:
+        # 使用免费的翻译 API
+        encoded_text = urllib.parse.quote(text[:4500])
+        url = f"https://translate.googleapis.com/translate_a/element.js?cb=googleTranslateElementInit&hl=zh-CN&client=gtx&sl=ko&tl=zh-CN&text={encoded_text}"
+        headers = {"User-Agent": "Mozilla/5.0 Chrome/122.0 Safari/537.36"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 200 and resp.text:
+            content = resp.text
+            if '","' in content:
+                # 尝试提取翻译结果
+                parts = content.split('","')
+                for part in parts:
+                    part = part.strip('"').strip()
+                    if part and len(part) > 5 and not part.startswith("googleTranslateElementInit"):
+                        return part
+    except Exception:
+        pass
+    return text
+
+
+def split_chunk_further(chunk: str, max_chars: int = 500) -> list:
+    """将 chunk 进一步分割成更小的部分"""
+    lines = chunk.replace("\r", "\n").split("\n")
+    sub_chunks = []
+    current = ""
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        if len(current) + len(line) + 1 <= max_chars:
+            current = (current + "\n" + line) if current else line
+        else:
+            if current:
+                sub_chunks.append(current)
+            current = line
+    
+    if current:
+        sub_chunks.append(current)
+    
+    return sub_chunks if sub_chunks else [chunk]
+
+
+def translate_chunk(client, chunk, index, total, previous_translation="", retry_count=0):
     context = ""
     if previous_translation:
         context = f"""【上一段译文结尾，仅用于保持上下文一致，不要重复翻译】
@@ -142,16 +189,36 @@ def translate_chunk(client, chunk, index, total, previous_translation=""):
 {chunk}
 """
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.2,
-    )
-
-    return response.choices[0].message.content.strip()
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        # 第一次重试：分割 chunk 重新翻译
+        if retry_count == 0:
+            sub_chunks = split_chunk_further(chunk)
+            if len(sub_chunks) > 1:
+                results = []
+                for sub_chunk in sub_chunks:
+                    try:
+                        translated = translate_chunk(client, sub_chunk, index, total, previous_translation, retry_count=1)
+                        results.append(translated)
+                    except Exception:
+                        # 小块翻译失败使用谷歌翻译
+                        results.append(translate_by_google(sub_chunk))
+                return "\n".join(results)
+        
+        # 全部失败使用谷歌翻译
+        fallback = translate_by_google(chunk)
+        if fallback and fallback != chunk:
+            return fallback
+        raise
 
 
 def contains_korean(text: str) -> bool:
@@ -260,8 +327,13 @@ class handler(BaseHTTPRequestHandler):
                     api_key=api_key,
                 )
 
-                translated = translate_chunk(client, chunk, index, total, previous)
-                self._send_json(200, {"ok": True, "translated": translated})
+                try:
+                    translated = translate_chunk(client, chunk, index, total, previous)
+                    self._send_json(200, {"ok": True, "translated": translated, "fallback": False})
+                except Exception as e:
+                    # 翻译彻底失败，使用谷歌翻译
+                    translated = translate_by_google(chunk)
+                    self._send_json(200, {"ok": True, "translated": translated, "fallback": True, "note": "此 chunk 使用了机械翻译"})
                 return
 
             if action == "fix":

@@ -286,6 +286,7 @@
 
         setProgress("翻译中", 0, total);
         const parts = [];
+        const fallbackChunks = [];
 
         for (let i = 0; i < total; i++) {
           const previous = parts.length ? parts[parts.length - 1] : "";
@@ -297,11 +298,18 @@
             previous,
           });
           parts.push(data.translated || "");
+          if (data.fallback) {
+            fallbackChunks.push(i + 1);
+          }
           $("output").value = parts.join("\n\n");
           setProgress("翻译中", i + 1, total);
         }
 
         setProgress("完成", total, total);
+
+        if (fallbackChunks.length > 0) {
+          showNotice(`第 ${fallbackChunks.join(", ")} 段使用了备选翻译（机械翻译）`);
+        }
 
         let text = $("output").value;
         if (containsKorean(text)) {
