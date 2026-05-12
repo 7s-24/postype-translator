@@ -14,9 +14,9 @@ import urllib.parse
 # ---------------------------------------------------------------------------
 # Models & config
 # ---------------------------------------------------------------------------
-MODEL_QUALITY = "qwen2.5-vl-72b-instruct"
-MODEL_FAST    = "qwen-turbo"
-MAX_CHARS     = 5000          # bigger chunks → fewer API calls
+MODEL_QUALITY = "qwen-max"
+MODEL_FAST    = "qwen2.5-vl-72b-instruct"
+MAX_CHARS     = 3000          # bigger chunks → fewer API calls
 
 # ---------------------------------------------------------------------------
 # System prompts
