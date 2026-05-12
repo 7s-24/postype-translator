@@ -11,8 +11,12 @@ import base64
 import io
 import urllib.parse
 
-MODEL = "qwen-plus-2025-07-28"
-MAX_CHARS = 3000
+# ---------------------------------------------------------------------------
+# Models & config
+# ---------------------------------------------------------------------------
+MODEL_QUALITY = "qwen-plus-2025-07-28"
+MODEL_FAST    = "qwen-turbo"
+MAX_CHARS     = 5000          # bigger chunks → fewer API calls
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -92,21 +96,14 @@ def parse_webarchive(data: bytes) -> str:
 def parse_postype_html(html: str, section_id: str = "post-content") -> str:
     soup = BeautifulSoup(html, "lxml")
     content = soup.find(id=section_id)
-
     if content is None:
-        raise RuntimeError(
-            f"没有找到 id='{section_id}'，请检查上传的 HTML 是否为 Postype 页面。"
-        )
-
+        raise RuntimeError(f"没有找到 id='{section_id}'，请检查上传的 HTML 是否为 Postype 页面。")
     for tag in content.find_all(["script", "style", "button", "nav", "aside"]):
         tag.decompose()
-
     text = content.get_text("\n", strip=True)
     text = re.sub(r"\n{3,}", "\n\n", text)
-
     if not text.strip():
         raise RuntimeError("正文为空。")
-
     return text.strip()
 
 
@@ -114,7 +111,7 @@ def fetch_postype_text(url: str) -> str:
     headers = {"User-Agent": "Mozilla/5.0 Chrome/122.0 Safari/537.36"}
     resp = requests.get(url, headers=headers, timeout=30)
     resp.raise_for_status()
-    return parse_postype_html(resp.text, section_id="post-content")
+    return parse_postype_html(resp.text)
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +121,6 @@ def fetch_postype_text(url: str) -> str:
 def split_text(text: str, max_chars: int = MAX_CHARS):
     paragraphs = text.replace("\r\n", "\n").split("\n")
     chunks, current = [], ""
-
     for para in paragraphs:
         para = para.strip()
         if not para:
@@ -140,7 +136,6 @@ def split_text(text: str, max_chars: int = MAX_CHARS):
                 current = ""
             else:
                 current = para + "\n\n"
-
     if current.strip():
         chunks.append(current.strip())
     return chunks
@@ -151,7 +146,6 @@ def split_text(text: str, max_chars: int = MAX_CHARS):
 # ---------------------------------------------------------------------------
 
 def sample_text(text: str, max_chars: int = 10000) -> str:
-    """Sample from a long text so the extraction prompt stays within limits."""
     if len(text) <= max_chars:
         return text
     first = text[:5000]
@@ -161,12 +155,11 @@ def sample_text(text: str, max_chars: int = 10000) -> str:
     return first + "\n…\n" + middle + "\n…\n" + last
 
 
-def extract_terms(client, text: str) -> list:
-    """Ask the LLM to scan Korean text and return a list of term dicts."""
+def extract_terms(client, text: str, model: str = MODEL_QUALITY) -> list:
     sampled = sample_text(text)
     try:
         resp = client.chat.completions.create(
-            model=MODEL,
+            model=model,
             messages=[
                 {"role": "system", "content": EXTRACT_TERMS_PROMPT},
                 {"role": "user", "content": sampled},
@@ -174,13 +167,11 @@ def extract_terms(client, text: str) -> list:
             temperature=0.1,
         )
         raw = resp.choices[0].message.content.strip()
-        # Strip markdown fences if present
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
         terms = json.loads(raw)
         if not isinstance(terms, list):
             return []
-        # Validate each entry
         valid = []
         for t in terms:
             if isinstance(t, dict) and "ko" in t and "zh" in t:
@@ -195,28 +186,22 @@ def extract_terms(client, text: str) -> list:
 
 
 def build_glossary_prompt_section(glossary: list) -> str:
-    """Build a glossary block to inject into each translate call."""
     if not glossary:
         return ""
     lines = ["【术语表——必须严格遵守以下译法，不得自行另译】"]
     for item in glossary:
-        ko = item.get("ko", "")
-        zh = item.get("zh", "")
+        ko, zh = item.get("ko", ""), item.get("zh", "")
         if ko and zh:
             lines.append(f"{ko} → {zh}")
     return "\n".join(lines)
 
 
 def apply_glossary_to_text(text: str, glossary: list) -> str:
-    """Post-process: replace any remaining Korean glossary terms with their
-    Chinese translations.  Useful after machine-translation fallback."""
     if not glossary:
         return text
-    # Sort by length descending so longer terms are replaced first
     sorted_g = sorted(glossary, key=lambda g: len(g.get("ko", "")), reverse=True)
     for item in sorted_g:
-        ko = item.get("ko", "")
-        zh = item.get("zh", "")
+        ko, zh = item.get("ko", ""), item.get("zh", "")
         if ko and zh and ko in text:
             text = text.replace(ko, zh)
     return text
@@ -227,16 +212,9 @@ def apply_glossary_to_text(text: str, glossary: list) -> str:
 # ---------------------------------------------------------------------------
 
 def translate_by_google(text: str) -> str:
-    """Free Google Translate fallback (best-effort)."""
     try:
         url = "https://translate.googleapis.com/translate_a/single"
-        params = {
-            "client": "gtx",
-            "sl": "ko",
-            "tl": "zh-CN",
-            "dt": "t",
-            "q": text[:5000],
-        }
+        params = {"client": "gtx", "sl": "ko", "tl": "zh-CN", "dt": "t", "q": text[:5000]}
         headers = {"User-Agent": "Mozilla/5.0 Chrome/122.0 Safari/537.36"}
         resp = requests.get(url, params=params, headers=headers, timeout=10)
         if resp.status_code == 200:
@@ -248,7 +226,7 @@ def translate_by_google(text: str) -> str:
     return text
 
 
-def split_chunk_further(chunk: str, max_chars: int = 500) -> list:
+def split_chunk_further(chunk: str, max_chars: int = 800) -> list:
     lines = chunk.replace("\r", "\n").split("\n")
     sub_chunks, current = [], ""
     for line in lines:
@@ -267,13 +245,11 @@ def split_chunk_further(chunk: str, max_chars: int = 500) -> list:
 
 
 def translate_chunk(
-    client,
-    chunk: str,
-    index: int,
-    total: int,
-    previous_translation: str = "",
-    glossary: list | None = None,
-    retry_count: int = 0,
+    client, chunk, index, total,
+    previous_translation="",
+    glossary=None,
+    model=MODEL_QUALITY,
+    retry_count=0,
 ):
     context = ""
     if previous_translation:
@@ -298,7 +274,7 @@ def translate_chunk(
 
     try:
         response = client.chat.completions.create(
-            model=MODEL,
+            model=model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
@@ -317,14 +293,13 @@ def translate_chunk(
                             translate_chunk(
                                 client, sc, index, total,
                                 previous_translation, glossary,
-                                retry_count=1,
+                                model=model, retry_count=1,
                             )
                         )
                     except Exception:
                         fb = translate_by_google(sc)
                         results.append(apply_glossary_to_text(fb, glossary or []))
                 return "\n".join(results)
-
         fallback = translate_by_google(chunk)
         fallback = apply_glossary_to_text(fallback, glossary or [])
         if fallback and fallback != chunk:
@@ -340,7 +315,7 @@ def contains_korean(text: str) -> bool:
     return bool(re.search(r"[\u3131-\u318E\uAC00-\uD7A3]", text))
 
 
-def fix_korean_line(client, line: str, previous: str = "", next_line: str = "") -> str:
+def fix_korean_line(client, line, previous="", next_line="", model=MODEL_QUALITY):
     prompt = (
         "下面是一段已经翻译成中文的文本，其中仍有韩文残留。\n"
         "请只翻译文本中的韩文部分为简体中文，保留其他已经是中文的内容原样。\n"
@@ -350,7 +325,7 @@ def fix_korean_line(client, line: str, previous: str = "", next_line: str = "") 
         f"下一行（仅供参考）：{next_line}\n"
     )
     response = client.chat.completions.create(
-        model=MODEL,
+        model=model,
         messages=[
             {"role": "system", "content": FIX_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
@@ -360,14 +335,14 @@ def fix_korean_line(client, line: str, previous: str = "", next_line: str = "") 
     return response.choices[0].message.content.strip()
 
 
-def fix_korean_text(client, text: str) -> str:
+def fix_korean_text(client, text, model=MODEL_QUALITY):
     lines = text.splitlines()
     fixed = []
     for idx, line in enumerate(lines):
         if contains_korean(line):
             prev = lines[idx - 1] if idx > 0 else ""
             nxt = lines[idx + 1] if idx < len(lines) - 1 else ""
-            fixed.append(fix_korean_line(client, line, prev, nxt))
+            fixed.append(fix_korean_line(client, line, prev, nxt, model=model))
         else:
             fixed.append(line)
     return "\n".join(fixed)
@@ -402,6 +377,9 @@ class handler(BaseHTTPRequestHandler):
             api_key=api_key,
         )
 
+    def _pick_model(self, data):
+        return MODEL_FAST if data.get("fast") else MODEL_QUALITY
+
     def do_POST(self):
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -431,9 +409,7 @@ class handler(BaseHTTPRequestHandler):
 
                 chunks = split_text(original_text)
                 return self._send_json(200, {
-                    "ok": True,
-                    "chunks": chunks,
-                    "total": len(chunks),
+                    "ok": True, "chunks": chunks, "total": len(chunks),
                 })
 
             # === EXTRACT TERMS ===
@@ -441,12 +417,11 @@ class handler(BaseHTTPRequestHandler):
                 text = data.get("text", "")
                 if not text:
                     return self._send_json(200, {"ok": True, "terms": []})
-
                 client = self._get_client()
                 if not client:
                     return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
-
-                terms = extract_terms(client, text)
+                # Always use quality model for term extraction (runs once)
+                terms = extract_terms(client, text, model=MODEL_QUALITY)
                 return self._send_json(200, {"ok": True, "terms": terms})
 
             # === TRANSLATE ===
@@ -456,17 +431,18 @@ class handler(BaseHTTPRequestHandler):
                 total = int(data.get("total", 1))
                 previous = data.get("previous", "")
                 glossary = data.get("glossary", [])
+                model = self._pick_model(data)
 
                 if not chunk:
                     return self._send_json(400, {"error": "缺少 chunk"})
-
                 client = self._get_client()
                 if not client:
                     return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
 
                 try:
                     translated = translate_chunk(
-                        client, chunk, index, total, previous, glossary=glossary
+                        client, chunk, index, total, previous,
+                        glossary=glossary, model=model,
                     )
                     return self._send_json(200, {
                         "ok": True, "translated": translated, "fallback": False,
@@ -484,15 +460,14 @@ class handler(BaseHTTPRequestHandler):
                 translated_text = data.get("translated_text", "")
                 if not translated_text:
                     return self._send_json(400, {"error": "缺少 translated_text"})
-
                 client = self._get_client()
                 if not client:
                     return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
-
-                fixed = fix_korean_text(client, translated_text)
+                model = self._pick_model(data)
+                fixed = fix_korean_text(client, translated_text, model=model)
                 return self._send_json(200, {"ok": True, "fixed_text": fixed})
 
-            self._send_json(400, {"error": "未知 action，应为 prepare、extract_terms、translate 或 fix"})
+            self._send_json(400, {"error": "未知 action"})
 
         except Exception as e:
             self._send_json(500, {"error": str(e)})
