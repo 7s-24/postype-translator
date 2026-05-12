@@ -1,473 +1,815 @@
-from http.server import BaseHTTPRequestHandler
-from openai import OpenAI
-from bs4 import BeautifulSoup
-import requests
-import json
-import os
-import re
-import time
-import plistlib
-import base64
-import io
-import urllib.parse
-
-# ---------------------------------------------------------------------------
-# Models & config
-# ---------------------------------------------------------------------------
-MODEL_QUALITY = "qwen-plus-2025-07-28"
-MODEL_FAST    = "qwen-turbo"
-MAX_CHARS     = 5000          # bigger chunks → fewer API calls
-
-# ---------------------------------------------------------------------------
-# System prompts
-# ---------------------------------------------------------------------------
-
-SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责将韩文正文翻译成简体中文。
-
-【核心要求】
-- 忠实翻译原文，不删减、不总结、不规避、不弱化。
-- 保留原文的情绪、暧昧张力、人物关系、语气词、停顿、喘息、拟声词。
-- 不添加原文没有的信息。
-- 不解释，不加注释，不输出前缀。
-- 只输出译文。
-
-【人名处理规则】
-- 严格按照术语表翻译人名，不得自行另译。
-- 原文使用艺名时，译文使用对应艺名。
-- 原文使用本名时，译文使用对应本名。
-- 不要把本名自动改成艺名。
-- 不要把艺名自动扩写成本名。
-- 如果原文只写名字，不要补姓。
-- 同一个人在同一称呼体系下必须前后一致。
-
-【称呼处理】
-- 형 → 哥
-- 선배 → 前辈
-- 후배 → 后辈
-- 막내 → 忙内 / 老幺，按语境选择
-- 이름 + 아/야 是亲昵称呼，按中文语感处理。
-
-【文风要求】
-- 成人内容按原文强度翻译，不额外加重，也不弱化。
-- 不确定说话人时，不要擅自添加主语。
-- 原文故意省略主语时，中文也可以适度省略。
-"""
-
-EXTRACT_TERMS_PROMPT = """你是专业韩文小说术语提取器。请阅读以下韩文小说文本，提取所有专有名词和术语。
-
-重点关注：
-1. 带 「」『』【】〈〉《》"" '' 及其他引号或括号包裹的词（通常是技能名、称号、物品名、作品名等）
-2. 反复出现的人名（包括昵称、绰号、缩写）、地名、组织名
-3. 虚构概念、魔法/能力名称、头衔、职位
-4. 非日常用语的专有名词
-
-输出要求：
-- 只输出 JSON 数组，不要任何其他文字、markdown 标记或代码块符号
-- 每项格式：{"ko": "韩文原文", "zh": "建议中文翻译", "category": "类别"}
-- category 可选值：人名、地名、技能、称号、物品、组织、其他
-- 不要包含日常词汇和通用动词/形容词
-- 如果没有找到术语，返回空数组 []
-"""
-
-FIX_SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责修正已经翻译文本中的韩文残留。
-
-【修正要求】
-- 只翻译文本中的韩文部分，保留其余已经是中文的内容原样。
-- 不要解释、不加注释、不输出前缀。
-- 不要改写本已是中文的部分。
-- 尽量参考上下文保持说话风格一致。
-- 只返回修正后的结果。
-"""
-
-
-# ---------------------------------------------------------------------------
-# HTML / WebArchive parsing
-# ---------------------------------------------------------------------------
-
-def parse_webarchive(data: bytes) -> str:
-    plist = plistlib.load(io.BytesIO(data))
-    main_resource = plist.get("WebMainResource", {})
-    data_bytes = main_resource.get("WebResourceData")
-    if isinstance(data_bytes, bytes):
-        return data_bytes.decode("utf-8", errors="replace")
-    raise ValueError("Invalid webarchive format or no main resource")
-
-
-def parse_postype_html(html: str, section_id: str = "post-content") -> str:
-    soup = BeautifulSoup(html, "lxml")
-    content = soup.find(id=section_id)
-    if content is None:
-        raise RuntimeError(f"没有找到 id='{section_id}'，请检查上传的 HTML 是否为 Postype 页面。")
-    for tag in content.find_all(["script", "style", "button", "nav", "aside"]):
-        tag.decompose()
-    text = content.get_text("\n", strip=True)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    if not text.strip():
-        raise RuntimeError("正文为空。")
-    return text.strip()
-
-
-def fetch_postype_text(url: str) -> str:
-    headers = {"User-Agent": "Mozilla/5.0 Chrome/122.0 Safari/537.36"}
-    resp = requests.get(url, headers=headers, timeout=30)
-    resp.raise_for_status()
-    return parse_postype_html(resp.text)
-
-
-# ---------------------------------------------------------------------------
-# Text chunking
-# ---------------------------------------------------------------------------
-
-def split_text(text: str, max_chars: int = MAX_CHARS):
-    paragraphs = text.replace("\r\n", "\n").split("\n")
-    chunks, current = [], ""
-    for para in paragraphs:
-        para = para.strip()
-        if not para:
-            continue
-        if len(current) + len(para) + 2 <= max_chars:
-            current += para + "\n\n"
-        else:
-            if current.strip():
-                chunks.append(current.strip())
-            if len(para) > max_chars:
-                for i in range(0, len(para), max_chars):
-                    chunks.append(para[i : i + max_chars])
-                current = ""
-            else:
-                current = para + "\n\n"
-    if current.strip():
-        chunks.append(current.strip())
-    return chunks
-
-
-# ---------------------------------------------------------------------------
-# Glossary helpers
-# ---------------------------------------------------------------------------
-
-def sample_text(text: str, max_chars: int = 10000) -> str:
-    if len(text) <= max_chars:
-        return text
-    first = text[:5000]
-    mid_start = len(text) // 2 - 1250
-    middle = text[mid_start : mid_start + 2500]
-    last = text[-2500:]
-    return first + "\n…\n" + middle + "\n…\n" + last
-
-
-def extract_terms(client, text: str, model: str = MODEL_QUALITY) -> list:
-    sampled = sample_text(text)
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": EXTRACT_TERMS_PROMPT},
-                {"role": "user", "content": sampled},
-            ],
-            temperature=0.1,
-        )
-        raw = resp.choices[0].message.content.strip()
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        terms = json.loads(raw)
-        if not isinstance(terms, list):
-            return []
-        valid = []
-        for t in terms:
-            if isinstance(t, dict) and "ko" in t and "zh" in t:
-                valid.append({
-                    "ko": str(t["ko"]),
-                    "zh": str(t["zh"]),
-                    "category": str(t.get("category", "其他")),
-                })
-        return valid
-    except Exception:
-        return []
-
-
-def build_glossary_prompt_section(glossary: list) -> str:
-    if not glossary:
-        return ""
-    lines = ["【术语表——必须严格遵守以下译法，不得自行另译】"]
-    for item in glossary:
-        ko, zh = item.get("ko", ""), item.get("zh", "")
-        if ko and zh:
-            lines.append(f"{ko} → {zh}")
-    return "\n".join(lines)
-
-
-def apply_glossary_to_text(text: str, glossary: list) -> str:
-    if not glossary:
-        return text
-    sorted_g = sorted(glossary, key=lambda g: len(g.get("ko", "")), reverse=True)
-    for item in sorted_g:
-        ko, zh = item.get("ko", ""), item.get("zh", "")
-        if ko and zh and ko in text:
-            text = text.replace(ko, zh)
-    return text
-
-
-# ---------------------------------------------------------------------------
-# Translation
-# ---------------------------------------------------------------------------
-
-def translate_by_google(text: str) -> str:
-    try:
-        url = "https://translate.googleapis.com/translate_a/single"
-        params = {"client": "gtx", "sl": "ko", "tl": "zh-CN", "dt": "t", "q": text[:5000]}
-        headers = {"User-Agent": "Mozilla/5.0 Chrome/122.0 Safari/537.36"}
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list) and isinstance(data[0], list):
-                return "".join(seg[0] for seg in data[0] if seg[0])
-    except Exception:
-        pass
-    return text
-
-
-def split_chunk_further(chunk: str, max_chars: int = 800) -> list:
-    lines = chunk.replace("\r", "\n").split("\n")
-    sub_chunks, current = [], ""
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        if len(current) + len(line) + 1 <= max_chars:
-            current = (current + "\n" + line) if current else line
-        else:
-            if current:
-                sub_chunks.append(current)
-            current = line
-    if current:
-        sub_chunks.append(current)
-    return sub_chunks if sub_chunks else [chunk]
-
-
-def translate_chunk(
-    client, chunk, index, total,
-    previous_translation="",
-    glossary=None,
-    model=MODEL_QUALITY,
-    retry_count=0,
-):
-    context = ""
-    if previous_translation:
-        context = (
-            "【上一段译文结尾，仅用于保持上下文一致，不要重复翻译】\n"
-            f"{previous_translation[-2000:]}\n\n"
-        )
-
-    glossary_section = build_glossary_prompt_section(glossary) if glossary else ""
-    if glossary_section:
-        glossary_section += "\n\n"
-
-    user_prompt = (
-        f"{context}{glossary_section}"
-        f"下面是韩文小说正文的第 {index}/{total} 段。\n\n"
-        "请直接翻译成简体中文。注意承接上一段的人物称呼、语气、情绪和文风，"
-        "但不要重复上一段内容。\n"
-        "特别注意保持术语和专有名词的翻译一致性，"
-        "如果术语表中有对应条目，必须使用术语表中的译法。\n\n"
-        f"【当前原文】\n{chunk}\n"
-    )
-
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.2,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception:
-        if retry_count == 0:
-            sub_chunks = split_chunk_further(chunk)
-            if len(sub_chunks) > 1:
-                results = []
-                for sc in sub_chunks:
-                    try:
-                        results.append(
-                            translate_chunk(
-                                client, sc, index, total,
-                                previous_translation, glossary,
-                                model=model, retry_count=1,
-                            )
-                        )
-                    except Exception:
-                        fb = translate_by_google(sc)
-                        results.append(apply_glossary_to_text(fb, glossary or []))
-                return "\n".join(results)
-        fallback = translate_by_google(chunk)
-        fallback = apply_glossary_to_text(fallback, glossary or [])
-        if fallback and fallback != chunk:
-            return fallback
-        raise
-
-
-# ---------------------------------------------------------------------------
-# Korean-residue fixer
-# ---------------------------------------------------------------------------
-
-def contains_korean(text: str) -> bool:
-    return bool(re.search(r"[\u3131-\u318E\uAC00-\uD7A3]", text))
-
-
-def fix_korean_line(client, line, previous="", next_line="", model=MODEL_QUALITY):
-    prompt = (
-        "下面是一段已经翻译成中文的文本，其中仍有韩文残留。\n"
-        "请只翻译文本中的韩文部分为简体中文，保留其他已经是中文的内容原样。\n"
-        "不要添加注释、说明、前缀或额外内容。不要改写已是中文的部分。\n\n"
-        f"上一行（仅供参考）：{previous}\n"
-        f"当前行：{line}\n"
-        f"下一行（仅供参考）：{next_line}\n"
-    )
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": FIX_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.2,
-    )
-    return response.choices[0].message.content.strip()
-
-
-def fix_korean_text(client, text, model=MODEL_QUALITY):
-    lines = text.splitlines()
-    fixed = []
-    for idx, line in enumerate(lines):
-        if contains_korean(line):
-            prev = lines[idx - 1] if idx > 0 else ""
-            nxt = lines[idx + 1] if idx < len(lines) - 1 else ""
-            fixed.append(fix_korean_line(client, line, prev, nxt, model=model))
-        else:
-            fixed.append(line)
-    return "\n".join(fixed)
-
-
-# ---------------------------------------------------------------------------
-# HTTP handler (Vercel serverless)
-# ---------------------------------------------------------------------------
-
-class handler(BaseHTTPRequestHandler):
-    def _send_json(self, status, data):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
-
-    def do_GET(self):
-        self._send_json(200, {"ok": True, "message": "Postype translator API is running."})
-
-    def do_OPTIONS(self):
-        self._send_json(200, {"ok": True})
-
-    def _get_client(self):
-        api_key = os.getenv("DASHSCOPE_API_KEY")
-        if not api_key:
-            return None
-        return OpenAI(
-            base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-            api_key=api_key,
-        )
-
-    def _pick_model(self, data):
-        return MODEL_FAST if data.get("fast") else MODEL_QUALITY
-
-    def do_POST(self):
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length)
-            data = json.loads(body.decode("utf-8"))
-            action = data.get("action", "")
-
-            # === PREPARE ===
-            if action == "prepare":
-                file_data = data.get("fileData")
-                if file_data:
-                    if file_data.get("type") == "webarchive":
-                        binary = base64.b64decode(file_data["content"])
-                        html = parse_webarchive(binary)
-                    else:
-                        html = file_data["content"]
-                    original_text = parse_postype_html(html)
-                elif data.get("text"):
-                    original_text = data["text"].strip()
-                    if not original_text:
-                        return self._send_json(400, {"error": "缺少正文内容"})
-                else:
-                    url = data.get("url", "").strip()
-                    if not url:
-                        return self._send_json(400, {"error": "缺少 URL 或内容"})
-                    original_text = fetch_postype_text(url)
-
-                chunks = split_text(original_text)
-                return self._send_json(200, {
-                    "ok": True, "chunks": chunks, "total": len(chunks),
-                })
-
-            # === EXTRACT TERMS ===
-            if action == "extract_terms":
-                text = data.get("text", "")
-                if not text:
-                    return self._send_json(200, {"ok": True, "terms": []})
-                client = self._get_client()
-                if not client:
-                    return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
-                # Always use quality model for term extraction (runs once)
-                terms = extract_terms(client, text, model=MODEL_QUALITY)
-                return self._send_json(200, {"ok": True, "terms": terms})
-
-            # === TRANSLATE ===
-            if action == "translate":
-                chunk = data.get("chunk", "")
-                index = int(data.get("index", 1))
-                total = int(data.get("total", 1))
-                previous = data.get("previous", "")
-                glossary = data.get("glossary", [])
-                model = self._pick_model(data)
-
-                if not chunk:
-                    return self._send_json(400, {"error": "缺少 chunk"})
-                client = self._get_client()
-                if not client:
-                    return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
-
-                try:
-                    translated = translate_chunk(
-                        client, chunk, index, total, previous,
-                        glossary=glossary, model=model,
-                    )
-                    return self._send_json(200, {
-                        "ok": True, "translated": translated, "fallback": False,
-                    })
-                except Exception:
-                    translated = translate_by_google(chunk)
-                    translated = apply_glossary_to_text(translated, glossary)
-                    return self._send_json(200, {
-                        "ok": True, "translated": translated, "fallback": True,
-                        "note": "此 chunk 使用了机械翻译",
-                    })
-
-            # === FIX ===
-            if action == "fix":
-                translated_text = data.get("translated_text", "")
-                if not translated_text:
-                    return self._send_json(400, {"error": "缺少 translated_text"})
-                client = self._get_client()
-                if not client:
-                    return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
-                model = self._pick_model(data)
-                fixed = fix_korean_text(client, translated_text, model=model)
-                return self._send_json(200, {"ok": True, "fixed_text": fixed})
-
-            self._send_json(400, {"error": "未知 action"})
-
-        except Exception as e:
-            self._send_json(500, {"error": str(e)})
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Postype Translator</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #fff;
+      color: #111;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .wrap {
+      max-width: 880px;
+      margin: 0 auto;
+      padding: 48px 24px 80px;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin: 0 0 32px;
+      padding-bottom: 16px;
+      border-bottom: 2px solid #111;
+    }
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #111;
+      margin: 0 0 8px;
+    }
+    input[type="url"], textarea {
+      width: 100%;
+      padding: 12px 14px;
+      font: inherit;
+      color: #111;
+      background: #fff;
+      border: 1px solid #111;
+      border-radius: 0;
+      outline: none;
+      box-shadow: none;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    input[type="url"]:focus, textarea:focus {
+      outline: 2px solid #111;
+      outline-offset: -2px;
+    }
+    textarea {
+      height: 480px;
+      resize: vertical;
+      white-space: pre-wrap;
+      font-family: inherit;
+    }
+    .field { margin-bottom: 24px; }
+
+    /* ---- actions row ---- */
+    .actions-row {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+    .actions-row .btns {
+      display: flex;
+      gap: 0;
+    }
+    button {
+      flex: 0 0 auto;
+      padding: 12px 24px;
+      font: inherit;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      border: 1px solid #111;
+      border-radius: 0;
+      cursor: pointer;
+      background: #111;
+      color: #fff;
+      transition: background 0.1s, color 0.1s;
+    }
+    button + button { margin-left: -1px; }
+    button.secondary { background: #fff; color: #111; }
+    button:hover:not(:disabled) { background: #444; color: #fff; }
+    button.secondary:hover:not(:disabled) { background: #111; color: #fff; }
+    button:disabled {
+      background: #fff;
+      color: #999;
+      border-color: #ccc;
+      cursor: not-allowed;
+    }
+
+    /* ---- fast mode toggle ---- */
+    .fast-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      user-select: none;
+      font-size: 13px;
+    }
+    .fast-toggle input { display: none; }
+    .fast-toggle .track {
+      width: 36px;
+      height: 20px;
+      background: #ccc;
+      border-radius: 10px;
+      position: relative;
+      transition: background 0.15s;
+    }
+    .fast-toggle input:checked + .track { background: #111; }
+    .fast-toggle .track::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 16px;
+      height: 16px;
+      background: #fff;
+      border-radius: 50%;
+      transition: left 0.15s;
+    }
+    .fast-toggle input:checked + .track::after { left: 18px; }
+    .fast-label { color: #555; }
+    .fast-toggle input:checked ~ .fast-label { color: #111; font-weight: 600; }
+
+    /* ---- panels ---- */
+    .panel {
+      border: 1px solid #111;
+      padding: 16px;
+      margin-bottom: 24px;
+      background: #fafafa;
+      display: none;
+    }
+    .panel.active { display: block; }
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+    .panel-head .count {
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.04em;
+    }
+    .bar {
+      width: 100%;
+      height: 10px;
+      background: #e6e6e6;
+      position: relative;
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      background: #111;
+      width: 0%;
+      transition: width 0.25s linear;
+    }
+    .error {
+      border: 1px solid #c00;
+      padding: 12px 14px;
+      margin-bottom: 24px;
+      color: #c00;
+      font-weight: 600;
+      background: #fff;
+      display: none;
+    }
+    .error.active { display: block; }
+    .notice {
+      border: 1px solid #0a6;
+      padding: 12px 14px;
+      margin-bottom: 24px;
+      color: #084;
+      background: #f4fffb;
+      display: none;
+    }
+    .notice.active { display: block; }
+
+    /* ---- tabs ---- */
+    .tabs {
+      display: flex;
+      margin-bottom: 24px;
+      border-bottom: 1px solid #111;
+    }
+    .tab {
+      padding: 12px 16px;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #666;
+      transition: color 0.1s, border-color 0.1s;
+    }
+    .tab.active { color: #111; border-bottom-color: #111; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* ---- glossary ---- */
+    .glossary-section { margin-bottom: 24px; }
+    .glossary-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 0;
+      border: none;
+      border-bottom: 1px solid #ddd;
+      background: none;
+      cursor: pointer;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #111;
+      width: 100%;
+      text-align: left;
+    }
+    .glossary-toggle:hover { color: #444; }
+    .glossary-toggle .arrow {
+      display: inline-block;
+      transition: transform 0.15s;
+      font-size: 10px;
+    }
+    .glossary-toggle.open .arrow { transform: rotate(90deg); }
+    .glossary-body { display: none; padding: 16px 0 0; }
+    .glossary-body.open { display: block; }
+    .glossary-toolbar {
+      display: flex;
+      gap: 0;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .glossary-toolbar button { padding: 8px 14px; font-size: 12px; }
+    .g-table-wrap {
+      max-height: 400px;
+      overflow-y: auto;
+      border: 1px solid #ddd;
+      margin-bottom: 12px;
+    }
+    .g-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .g-table th {
+      position: sticky; top: 0;
+      background: #f5f5f5;
+      font-size: 10px; font-weight: 700;
+      letter-spacing: 0.1em; text-transform: uppercase;
+      text-align: left; padding: 8px 10px;
+      border-bottom: 1px solid #ddd; z-index: 1;
+    }
+    .g-table td {
+      padding: 4px 6px;
+      border-bottom: 1px solid #eee;
+      vertical-align: middle;
+    }
+    .g-table input {
+      width: 100%; padding: 6px 8px;
+      font: inherit; font-size: 13px;
+      border: 1px solid #ddd; border-radius: 0;
+      background: #fff; outline: none;
+    }
+    .g-table input:focus { border-color: #111; }
+    .g-table select {
+      width: 100%; padding: 6px 4px;
+      font: inherit; font-size: 12px;
+      border: 1px solid #ddd; border-radius: 0;
+      background: #fff; outline: none;
+    }
+    .g-table .col-ko  { width: 28%; }
+    .g-table .col-zh  { width: 28%; }
+    .g-table .col-cat { width: 22%; }
+    .g-table .col-src { width: 12%; }
+    .g-table .col-del { width: 10%; text-align: center; }
+    .btn-del {
+      padding: 4px 10px; font-size: 12px;
+      background: #fff; color: #c00;
+      border: 1px solid #c00; cursor: pointer;
+    }
+    .btn-del:hover { background: #c00; color: #fff; }
+    .source-tag {
+      display: inline-block; font-size: 10px; font-weight: 700;
+      letter-spacing: 0.06em; padding: 2px 6px; border: 1px solid;
+    }
+    .source-tag.global  { color: #555; border-color: #bbb; }
+    .source-tag.article { color: #07a; border-color: #07a; }
+
+    #terms-review {
+      border: 1px solid #111;
+      padding: 16px; margin-bottom: 24px;
+      background: #fafafa; display: none;
+    }
+    #terms-review.active { display: block; }
+    #terms-review .panel-head { margin-bottom: 12px; }
+    .terms-hint { font-size: 13px; color: #555; margin: 0 0 12px; }
+    .terms-actions { display: flex; gap: 0; margin-top: 12px; }
+    .terms-actions button { padding: 10px 20px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Postype Translator</h1>
+
+    <!-- Input Tabs -->
+    <div class="tabs">
+      <button class="tab active" data-tab="url">URL</button>
+      <button class="tab" data-tab="manual">手动输入</button>
+      <button class="tab" data-tab="file">文件上传</button>
+    </div>
+    <div id="url-tab" class="tab-content active">
+      <div class="field">
+        <label for="url">原文 URL</label>
+        <input id="url" type="url" placeholder="https://..." autocomplete="off" />
+      </div>
+    </div>
+    <div id="manual-tab" class="tab-content">
+      <div class="field">
+        <label for="manual-html">韩文正文</label>
+        <textarea id="manual-html" placeholder="粘贴韩文小说正文"></textarea>
+      </div>
+    </div>
+    <div id="file-tab" class="tab-content">
+      <div class="field">
+        <label for="file-html">Postype HTML 或 WebArchive</label>
+        <input id="file-html" type="file" accept=".html,.htm,.webarchive" />
+      </div>
+    </div>
+
+    <!-- Global Glossary -->
+    <div class="glossary-section">
+      <button class="glossary-toggle" id="glossary-toggle" type="button">
+        <span class="arrow">▶</span>
+        <span>全局术语库 (<span id="glossary-count">0</span> 条)</span>
+      </button>
+      <div class="glossary-body" id="glossary-body">
+        <div class="glossary-toolbar">
+          <button type="button" onclick="addGlossaryRow()">+ 添加</button>
+          <button type="button" class="secondary" onclick="exportGlossary()">导出</button>
+          <button type="button" class="secondary" onclick="$('import-file').click()">导入</button>
+          <button type="button" class="secondary" onclick="resetGlossary()">恢复默认</button>
+        </div>
+        <div class="g-table-wrap">
+          <table class="g-table">
+            <thead><tr>
+              <th class="col-ko">韩文</th>
+              <th class="col-zh">中文</th>
+              <th class="col-cat">类别</th>
+              <th class="col-del"></th>
+            </tr></thead>
+            <tbody id="glossary-tbody"></tbody>
+          </table>
+        </div>
+        <input type="file" id="import-file" accept=".json" style="display:none" />
+      </div>
+    </div>
+
+    <!-- Actions + Fast Toggle -->
+    <div class="actions-row">
+      <div class="btns">
+        <button id="btn-translate" type="button">翻译</button>
+        <button id="btn-download" class="secondary" type="button">导出 TXT</button>
+      </div>
+      <label class="fast-toggle">
+        <input type="checkbox" id="fast-mode" />
+        <span class="track"></span>
+        <span class="fast-label">快速模式</span>
+      </label>
+    </div>
+
+    <div id="error" class="error" role="alert"></div>
+    <div id="notice" class="notice" role="status"></div>
+
+    <!-- Article Terms Review -->
+    <div id="terms-review">
+      <div class="panel-head">
+        <span>篇章术语确认</span>
+        <span class="count" id="terms-count">0 条</span>
+      </div>
+      <p class="terms-hint">以下术语由 AI 从原文中提取并与全局术语库合并。翻译时将严格遵守此表。</p>
+      <div class="g-table-wrap" style="max-height:320px">
+        <table class="g-table">
+          <thead><tr>
+            <th class="col-ko">韩文</th>
+            <th class="col-zh">中文</th>
+            <th class="col-cat">类别</th>
+            <th class="col-src">来源</th>
+            <th class="col-del"></th>
+          </tr></thead>
+          <tbody id="terms-tbody"></tbody>
+        </table>
+      </div>
+      <div style="margin-top:8px">
+        <button type="button" onclick="addTermRow()" style="padding:6px 12px;font-size:12px">+ 添加术语</button>
+      </div>
+      <div class="terms-actions">
+        <button type="button" id="btn-confirm-translate">确认并翻译</button>
+        <button type="button" class="secondary" id="btn-skip-translate">跳过术语，直接翻译</button>
+      </div>
+    </div>
+
+    <!-- Progress -->
+    <div id="progress" class="panel" aria-live="polite">
+      <div class="panel-head">
+        <span id="progress-label">准备中</span>
+        <span class="count"><span id="progress-done">0</span> / <span id="progress-total">0</span></span>
+      </div>
+      <div class="bar"><div id="progress-fill" class="bar-fill"></div></div>
+    </div>
+
+    <!-- Output -->
+    <div class="field">
+      <label for="output">译文</label>
+      <textarea id="output" placeholder="译文会显示在这里"></textarea>
+    </div>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+const CATEGORIES = ["人名","地名","技能","称号","物品","组织","称呼","艺名","本名","其他"];
+const STORAGE_KEY = "postype_global_glossary";
+const BATCH_SIZE = 4; // parallel concurrency
+
+const DEFAULT_GLOSSARY = [
+  { ko:"신유",   zh:"申惟",   category:"艺名" },
+  { ko:"도훈",   zh:"道勋",   category:"艺名" },
+  { ko:"영재",   zh:"英宰",   category:"艺名" },
+  { ko:"한진",   zh:"韩振",   category:"艺名" },
+  { ko:"지훈",   zh:"志薰",   category:"艺名" },
+  { ko:"경민",   zh:"炅潣",   category:"艺名" },
+  { ko:"신정환", zh:"申正焕", category:"本名" },
+  { ko:"김도훈", zh:"金道勋", category:"本名" },
+  { ko:"최영재", zh:"崔英宰", category:"本名" },
+  { ko:"한지훈", zh:"韩志薰", category:"本名" },
+  { ko:"이경민", zh:"李炅潣", category:"本名" },
+  { ko:"형",     zh:"哥",     category:"称呼" },
+  { ko:"선배",   zh:"前辈",   category:"称呼" },
+  { ko:"후배",   zh:"后辈",   category:"称呼" },
+  { ko:"막내",   zh:"忙内",   category:"称呼" },
+];
+
+// ── Utility ──────────────────────────────────────────────
+function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
+function containsKorean(t) { return /[\u3131-\u318E\uAC00-\uD7A3]/.test(t); }
+function isFast() { return $("fast-mode").checked; }
+
+function setProgress(label, done, total) {
+  $("progress-label").textContent = label;
+  $("progress-done").textContent = done;
+  $("progress-total").textContent = total;
+  $("progress-fill").style.width = (total > 0 ? Math.min(100, Math.round(done/total*100)) : 0) + "%";
+}
+function showError(msg)  { const e=$("error"); e.textContent="错误："+msg; e.classList.add("active"); }
+function clearError()    { $("error").classList.remove("active"); }
+function showNotice(msg) { const n=$("notice"); n.textContent=msg; n.classList.add("active"); }
+function clearNotice()   { $("notice").classList.remove("active"); }
+
+function setBusy(busy) {
+  $("btn-translate").disabled = busy;
+  $("btn-download").disabled = busy;
+  $("file-html").disabled = busy;
+  $("manual-html").disabled = busy;
+  $("url").disabled = busy;
+  $("fast-mode").disabled = busy;
+  $("btn-translate").textContent = busy ? "处理中…" : "翻译";
+}
+
+function readFile(file) {
+  return new Promise((resolve, reject) => {
+    if (file.name.toLowerCase().endsWith(".webarchive")) {
+      const r = new FileReader();
+      r.onload = () => {
+        const u8 = new Uint8Array(r.result);
+        let bin = "";
+        for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+        resolve({ type: "webarchive", content: btoa(bin) });
+      };
+      r.onerror = () => reject(new Error("读取 WebArchive 失败"));
+      r.readAsArrayBuffer(file);
+    } else {
+      const r = new FileReader();
+      r.onload = () => resolve({ type: "html", content: r.result });
+      r.onerror = () => reject(new Error("读取文件失败"));
+      r.readAsText(file, "utf-8");
+    }
+  });
+}
+
+async function postJSON(body) {
+  const res = await fetch("/api/translate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) throw new Error(data.error || `请求失败 (HTTP ${res.status})`);
+  return data;
+}
+
+function catOptions(sel) {
+  return CATEGORIES.map(c => `<option value="${c}"${c===sel?" selected":""}>${c}</option>`).join("");
+}
+
+// ══════════════════════════════════════════════════════════
+//  GLOBAL GLOSSARY
+// ══════════════════════════════════════════════════════════
+function loadGlossary()    { try { const r=localStorage.getItem(STORAGE_KEY); if(r) return JSON.parse(r); } catch{} return null; }
+function saveGlossary(arr) { localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); $("glossary-count").textContent=arr.length; }
+function getGlossary()     { return loadGlossary() || [...DEFAULT_GLOSSARY]; }
+
+function renderGlossaryTable() {
+  const items = getGlossary();
+  const tbody = $("glossary-tbody");
+  tbody.innerHTML = items.map((it, i) => `
+    <tr data-idx="${i}">
+      <td><input value="${esc(it.ko)}" data-field="ko" /></td>
+      <td><input value="${esc(it.zh)}" data-field="zh" /></td>
+      <td><select data-field="category">${catOptions(it.category)}</select></td>
+      <td style="text-align:center"><button class="btn-del" onclick="delGlossaryRow(${i})">✕</button></td>
+    </tr>`).join("");
+  $("glossary-count").textContent = items.length;
+  tbody.querySelectorAll("input,select").forEach(el => {
+    el.addEventListener("change", () => {
+      const idx = +el.closest("tr").dataset.idx;
+      const arr = getGlossary();
+      arr[idx][el.dataset.field] = el.value;
+      saveGlossary(arr);
+    });
+  });
+}
+function addGlossaryRow() {
+  const arr = getGlossary();
+  arr.push({ ko:"", zh:"", category:"其他" });
+  saveGlossary(arr);
+  renderGlossaryTable();
+  const w = $("glossary-body").querySelector(".g-table-wrap");
+  w.scrollTop = w.scrollHeight;
+}
+function delGlossaryRow(i) { const a=getGlossary(); a.splice(i,1); saveGlossary(a); renderGlossaryTable(); }
+
+function exportGlossary() {
+  const blob = new Blob([JSON.stringify(getGlossary(),null,2)], { type:"application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "glossary.json";
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+$("import-file").addEventListener("change", async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const arr = JSON.parse(await f.text());
+    if (!Array.isArray(arr)) throw new Error("格式错误");
+    const v = arr.filter(t => t && typeof t.ko==="string" && typeof t.zh==="string");
+    v.forEach(t => { if (!t.category) t.category="其他"; });
+    saveGlossary(v); renderGlossaryTable();
+  } catch(err) { showError("导入失败："+err.message); }
+  e.target.value = "";
+});
+function resetGlossary() {
+  if (!confirm("确定恢复为默认术语库？")) return;
+  saveGlossary([...DEFAULT_GLOSSARY]); renderGlossaryTable();
+}
+$("glossary-toggle").addEventListener("click", () => {
+  $("glossary-toggle").classList.toggle("open");
+  $("glossary-body").classList.toggle("open");
+});
+
+// ══════════════════════════════════════════════════════════
+//  ARTICLE TERMS REVIEW
+// ══════════════════════════════════════════════════════════
+let pendingChunks = [];
+let mergedGlossary = [];
+
+function renderTermsTable() {
+  const tbody = $("terms-tbody");
+  tbody.innerHTML = mergedGlossary.map((it, i) => `
+    <tr data-idx="${i}">
+      <td><input value="${esc(it.ko)}" data-field="ko" /></td>
+      <td><input value="${esc(it.zh)}" data-field="zh" /></td>
+      <td><select data-field="category">${catOptions(it.category)}</select></td>
+      <td><span class="source-tag ${it._src||"article"}">${it._src==="global"?"全局":"提取"}</span></td>
+      <td style="text-align:center"><button class="btn-del" onclick="delTermRow(${i})">✕</button></td>
+    </tr>`).join("");
+  $("terms-count").textContent = mergedGlossary.length + " 条";
+  tbody.querySelectorAll("input,select").forEach(el => {
+    el.addEventListener("change", () => {
+      mergedGlossary[+el.closest("tr").dataset.idx][el.dataset.field] = el.value;
+    });
+  });
+}
+function delTermRow(i) { mergedGlossary.splice(i,1); renderTermsTable(); }
+function addTermRow()  {
+  mergedGlossary.push({ ko:"", zh:"", category:"其他", _src:"article" });
+  renderTermsTable();
+  const w = $("terms-review").querySelector(".g-table-wrap");
+  w.scrollTop = w.scrollHeight;
+}
+function showTermsReview(global, article) {
+  const seen = new Set();
+  mergedGlossary = [];
+  for (const t of article) { if (!t.ko) continue; seen.add(t.ko); mergedGlossary.push({...t, _src:"article"}); }
+  for (const t of global)  { if (!t.ko||seen.has(t.ko)) continue; seen.add(t.ko); mergedGlossary.push({...t, _src:"global"}); }
+  renderTermsTable();
+  $("terms-review").classList.add("active");
+}
+function hideTermsReview() { $("terms-review").classList.remove("active"); }
+
+// ══════════════════════════════════════════════════════════
+//  MAIN FLOW
+// ══════════════════════════════════════════════════════════
+
+// Phase 1: Prepare + Extract
+async function prepareAndExtract() {
+  const url = $("url").value.trim();
+  const manual = $("manual-html").value.trim();
+  const fileInput = $("file-html");
+  const file = fileInput.files && fileInput.files[0];
+  if (!url && !manual && !file) { showError("请输入 URL、手动粘贴正文或上传文件"); return; }
+  if (file && file.size > 3*1024*1024) { showError("文件太大，请选择小于 3 MB 的文件"); return; }
+
+  clearError(); clearNotice(); hideTermsReview();
+  $("output").value = "";
+  $("progress").classList.add("active");
+  setBusy(true);
+
+  try {
+    let prep;
+    if (file) {
+      setProgress("解析文件", 0, 1);
+      prep = await postJSON({ action: "prepare", fileData: await readFile(file) });
+    } else if (manual) {
+      setProgress("处理文本", 0, 1);
+      prep = await postJSON({ action: "prepare", text: manual });
+    } else {
+      setProgress("获取网页", 0, 1);
+      prep = await postJSON({ action: "prepare", url });
+    }
+    const chunks = prep.chunks || [];
+    if (!chunks.length) throw new Error("正文为空");
+    pendingChunks = chunks;
+
+    setProgress("提取术语", 0, 1);
+    const ext = await postJSON({ action: "extract_terms", text: chunks.join("\n\n") });
+    const articleTerms = ext.terms || [];
+
+    $("progress").classList.remove("active");
+    setBusy(false);
+
+    showTermsReview(getGlossary(), articleTerms);
+    showNotice(
+      articleTerms.length
+        ? `从原文中提取了 ${articleTerms.length} 条术语（共 ${chunks.length} 段），请确认后开始翻译。`
+        : `未检测到新术语（共 ${chunks.length} 段），将使用全局术语库。请确认后开始翻译。`
+    );
+  } catch (err) {
+    showError(err.message || String(err));
+    $("progress-label").textContent = "失败";
+    setBusy(false);
+  }
+}
+
+// Phase 2: Translate
+async function translateWithGlossary(glossary) {
+  hideTermsReview();
+  clearError(); clearNotice();
+  $("output").value = "";
+  $("progress").classList.add("active");
+  setBusy(true);
+
+  const chunks = pendingChunks;
+  const total = chunks.length;
+  const fast = isFast();
+  const clean = glossary.filter(g => g.ko && g.zh).map(g => ({ ko:g.ko, zh:g.zh, category:g.category }));
+
+  try {
+    setProgress("翻译中", 0, total);
+    const parts = new Array(total).fill("");
+    const fallbackList = [];
+
+    if (fast && total > 1) {
+      // ── PARALLEL BATCH MODE ──
+      let lastPrev = "";
+      for (let start = 0; start < total; start += BATCH_SIZE) {
+        const end = Math.min(start + BATCH_SIZE, total);
+        setProgress(`翻译第 ${start+1}–${end}/${total} 段`, start, total);
+
+        const promises = [];
+        for (let j = start; j < end; j++) {
+          promises.push(
+            postJSON({
+              action: "translate",
+              chunk: chunks[j],
+              index: j + 1,
+              total,
+              previous: j === start ? lastPrev : "",
+              glossary: clean,
+              fast: true,
+            })
+          );
+        }
+
+        const results = await Promise.all(promises);
+        for (let j = 0; j < results.length; j++) {
+          const idx = start + j;
+          parts[idx] = results[j].translated || "";
+          if (results[j].fallback) fallbackList.push(idx + 1);
+        }
+
+        lastPrev = parts[end - 1];
+        $("output").value = parts.filter(Boolean).join("\n\n");
+        setProgress("翻译中", end, total);
+      }
+    } else {
+      // ── SEQUENTIAL MODE ──
+      for (let i = 0; i < total; i++) {
+        const prev = i > 0 ? parts[i - 1] : "";
+        setProgress(`翻译第 ${i+1}/${total} 段`, i, total);
+        const data = await postJSON({
+          action: "translate",
+          chunk: chunks[i],
+          index: i + 1,
+          total,
+          previous: prev,
+          glossary: clean,
+          fast: false,
+        });
+        parts[i] = data.translated || "";
+        if (data.fallback) fallbackList.push(i + 1);
+        $("output").value = parts.filter(Boolean).join("\n\n");
+        setProgress("翻译中", i + 1, total);
+      }
+    }
+
+    setProgress("完成", total, total);
+
+    if (fallbackList.length) {
+      showNotice(`第 ${fallbackList.join(", ")} 段使用了备选翻译（机械翻译 + 术语替换）`);
+    }
+
+    // Fix Korean residue
+    let text = $("output").value;
+    if (containsKorean(text)) {
+      setProgress("修正韩文残留", total, total);
+      showNotice("检测到韩文残留，正在自动修正…");
+      const fix = await postJSON({ action: "fix", translated_text: text, fast });
+      if (fix.fixed_text) { text = fix.fixed_text; $("output").value = text; }
+      showNotice(
+        containsKorean(text)
+          ? "修正已尝试，仍检测到韩文字符，请手动检查。"
+          : "已自动修正韩文残留，请检查译文。"
+      );
+    }
+  } catch (err) {
+    showError(err.message || String(err));
+    $("progress-label").textContent = "失败";
+  } finally {
+    setBusy(false);
+  }
+}
+
+// ── Events ───────────────────────────────────────────────
+
+$("btn-translate").addEventListener("click", prepareAndExtract);
+$("btn-confirm-translate").addEventListener("click", () => translateWithGlossary(mergedGlossary));
+$("btn-skip-translate").addEventListener("click", () => {
+  translateWithGlossary(getGlossary().map(g => ({...g, _src:"global"})));
+});
+
+$("btn-download").addEventListener("click", () => {
+  const text = $("output").value.trim();
+  if (!text) { showError("请先翻译，再导出。"); return; }
+  clearError();
+  const blob = new Blob([text], { type:"text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "translated.txt";
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+});
+
+$("url").addEventListener("keydown", e => { if (e.key==="Enter") prepareAndExtract(); });
+
+// Tabs
+function switchTab(name) {
+  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+  document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
+  document.querySelector(`[data-tab="${name}"]`).classList.add("active");
+  $(`${name}-tab`).classList.add("active");
+}
+document.querySelectorAll(".tab").forEach(t => {
+  t.addEventListener("click", () => switchTab(t.dataset.tab));
+});
+
+// ── Init ─────────────────────────────────────────────────
+if (!loadGlossary()) saveGlossary([...DEFAULT_GLOSSARY]);
+renderGlossaryTable();
+</script>
+</body>
+</html>
