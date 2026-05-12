@@ -437,8 +437,8 @@
       document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
       
       // Show selected tab
-      $(`[data-tab="${tabName}"]`).classList.add('active');
-      $(`${tabName}-tab`).classList.add('active');
+      document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+      document.getElementById(`${tabName}-tab`).classList.add('active');
     }
 
     // Tab event listeners
