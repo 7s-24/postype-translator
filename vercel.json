@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/translate",
-      "destination": "/api/translate.py"
+      "destination": "/api/app.py"
     }
   ]
 }
