@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/translate.py": {
+      "runtime": "python3.12"
+    }
+  }
+}
