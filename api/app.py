@@ -314,10 +314,15 @@ class handler(BaseHTTPRequestHandler):
                 elif data.get("html"):
                     html = data.get("html", "")
                     original_text = parse_postype_html(html, section_id="post-content")
+                elif data.get("text"):
+                    original_text = data.get("text", "").strip()
+                    if not original_text:
+                        self._send_json(400, {"error": "缺少正文内容"})
+                        return
                 else:
                     url = data.get("url", "").strip()
                     if not url:
-                        self._send_json(400, {"error": "缺少 URL 或 HTML 文件内容"})
+                        self._send_json(400, {"error": "缺少 URL 或内容"})
                         return
                     original_text = fetch_postype_text(url)
 

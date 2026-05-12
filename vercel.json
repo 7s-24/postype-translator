@@ -1,9 +1,4 @@
 {
-  "functions": {
-    "api/app.py": {
-      "maxBodySize": 50
-    }
-  },
   "rewrites": [
     {
       "source": "/api/translate",

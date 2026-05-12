@@ -161,6 +161,11 @@
     </div>
 
     <div class="field">
+      <label for="manual-html">或手动输入韩文正文</label>
+      <textarea id="manual-html" placeholder="粘贴韩文小说正文"></textarea>
+    </div>
+
+    <div class="field">
       <label for="file-html">或上传 Postype HTML 或 WebArchive</label>
       <input id="file-html" type="file" accept=".html,.htm,.webarchive" />
     </div>
@@ -212,6 +217,7 @@
       $("btn-translate").disabled = busy;
       $("btn-download").disabled = busy;
       $("file-html").disabled = busy;
+      $("manual-html").disabled = busy;
       $("btn-translate").textContent = busy ? "翻译中…" : "翻译";
     }
 
@@ -278,10 +284,17 @@
 
     async function translatePost() {
       const url = $("url").value.trim();
+      const manualHtml = $("manual-html").value.trim();
       const fileInput = $("file-html");
       const file = fileInput.files && fileInput.files[0];
-      if (!url && !file) {
-        showError("请输入 URL 或上传 Postype HTML 文件");
+      if (!url && !manualHtml && !file) {
+        showError("请输入 URL、手动输入韩文正文 或上传文件");
+        return;
+      }
+
+      // Check file size to prevent HTTP 413
+      if (file && file.size > 3 * 1024 * 1024) { // 3MB limit
+        showError("文件太大，请选择小于 3MB 的文件");
         return;
       }
 
@@ -298,6 +311,8 @@
         if (file) {
           const fileData = await readFile(file);
           prep = await postJSON({ action: "prepare", fileData });
+        } else if (manualHtml) {
+          prep = await postJSON({ action: "prepare", text: manualHtml });
         } else {
           prep = await postJSON({ action: "prepare", url });
         }
