@@ -224,7 +224,7 @@ class handler(BaseHTTPRequestHandler):
             if action == "prepare":
                 html = data.get("html", "")
                 if html:
-                    original_text = parse_postype_html(html, section_id="post-section")
+                    original_text = parse_postype_html(html, section_id="post-content")
                 else:
                     url = data.get("url", "").strip()
                     if not url:
