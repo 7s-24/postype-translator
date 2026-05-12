@@ -158,44 +158,54 @@ class handler(BaseHTTPRequestHandler):
     
     def do_OPTIONS(self):
         self._send_json(200, {"ok": True})
-
+        
     def do_POST(self):
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
             data = json.loads(body.decode("utf-8"))
+            action = data.get("action", "")
 
-            url = data.get("url", "").strip()
-            if not url:
-                self._send_json(400, {"error": "缺少 URL"})
+            if action == "prepare":
+                url = data.get("url", "").strip()
+                if not url:
+                    self._send_json(400, {"error": "缺少 URL"})
+                    return
+
+                original_text = fetch_postype_text(url)
+                chunks = split_text(original_text)
+                self._send_json(200, {
+                    "ok": True,
+                    "chunks": chunks,
+                    "total": len(chunks),
+                })
                 return
 
-            api_key = os.getenv("DASHSCOPE_API_KEY")
-            if not api_key:
-                self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
+            if action == "translate":
+                chunk = data.get("chunk", "")
+                index = int(data.get("index", 1))
+                total = int(data.get("total", 1))
+                previous = data.get("previous", "")
+
+                if not chunk:
+                    self._send_json(400, {"error": "缺少 chunk"})
+                    return
+
+                api_key = os.getenv("DASHSCOPE_API_KEY")
+                if not api_key:
+                    self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
+                    return
+
+                client = OpenAI(
+                    base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                    api_key=api_key,
+                )
+
+                translated = translate_chunk(client, chunk, index, total, previous)
+                self._send_json(200, {"ok": True, "translated": translated})
                 return
 
-            client = OpenAI(
-                base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-                api_key=api_key,
-            )
-
-            original_text = fetch_postype_text(url)
-            chunks = split_text(original_text)
-
-            translated_parts = []
-            for i, chunk in enumerate(chunks, start=1):
-                previous = translated_parts[-1] if translated_parts else ""
-                translated = translate_chunk(client, chunk, i, len(chunks), previous)
-                translated_parts.append(translated)
-                time.sleep(0.5)
-
-            self._send_json(200, {
-                "ok": True,
-                "chunks": len(chunks),
-                "original": original_text,
-                "translated": "\n\n".join(translated_parts),
-            })
+            self._send_json(400, {"error": "未知 action，应为 prepare 或 translate"})
 
         except Exception as e:
             self._send_json(500, {"error": str(e)})
