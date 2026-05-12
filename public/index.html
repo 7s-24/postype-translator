@@ -144,10 +144,33 @@
       display: none;
     }
     .notice.active { display: block; }
-    @media (max-width: 560px) {
-      .wrap { padding: 32px 16px 64px; }
-      .actions { flex-direction: column; }
-      button + button { margin-left: 0; margin-top: -1px; }
+    .tabs {
+      display: flex;
+      margin-bottom: 24px;
+      border-bottom: 1px solid #111;
+    }
+    .tab {
+      padding: 12px 16px;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #666;
+      transition: color 0.1s, border-color 0.1s;
+    }
+    .tab.active {
+      color: #111;
+      border-bottom-color: #111;
+    }
+    .tab-content {
+      display: none;
+    }
+    .tab-content.active {
+      display: block;
     }
   </style>
 </head>
@@ -155,19 +178,31 @@
   <div class="wrap">
     <h1>Postype Translator</h1>
 
-    <div class="field">
-      <label for="url">原文 URL</label>
-      <input id="url" type="url" placeholder="https://..." autocomplete="off" />
+    <div class="tabs">
+      <button class="tab active" data-tab="url">URL</button>
+      <button class="tab" data-tab="manual">手动输入</button>
+      <button class="tab" data-tab="file">文件上传</button>
     </div>
 
-    <div class="field">
-      <label for="manual-html">或手动输入韩文正文</label>
-      <textarea id="manual-html" placeholder="粘贴韩文小说正文"></textarea>
+    <div id="url-tab" class="tab-content active">
+      <div class="field">
+        <label for="url">原文 URL</label>
+        <input id="url" type="url" placeholder="https://..." autocomplete="off" />
+      </div>
     </div>
 
-    <div class="field">
-      <label for="file-html">或上传 Postype HTML 或 WebArchive</label>
-      <input id="file-html" type="file" accept=".html,.htm,.webarchive" />
+    <div id="manual-tab" class="tab-content">
+      <div class="field">
+        <label for="manual-html">韩文正文</label>
+        <textarea id="manual-html" placeholder="粘贴韩文小说正文"></textarea>
+      </div>
+    </div>
+
+    <div id="file-tab" class="tab-content">
+      <div class="field">
+        <label for="file-html">Postype HTML 或 WebArchive</label>
+        <input id="file-html" type="file" accept=".html,.htm,.webarchive" />
+      </div>
     </div>
 
     <div class="actions">
@@ -310,10 +345,13 @@
 
         if (file) {
           const fileData = await readFile(file);
+          setProgress("解析文件内容", 0, 1);
           prep = await postJSON({ action: "prepare", fileData });
         } else if (manualHtml) {
+          setProgress("处理输入文本", 0, 1);
           prep = await postJSON({ action: "prepare", text: manualHtml });
         } else {
+          setProgress("获取网页内容", 0, 1);
           prep = await postJSON({ action: "prepare", url });
         }
 
@@ -330,6 +368,7 @@
 
         for (let i = 0; i < total; i++) {
           const previous = parts.length ? parts[parts.length - 1] : "";
+          setProgress(`翻译第 ${i + 1}/${total} 段`, i, total);
           const data = await postJSON({
             action: "translate",
             chunk: chunks[i],
@@ -338,7 +377,6 @@
             previous,
           });
           parts.push(data.translated || "");
-          if (data.fallback) {
             fallbackChunks.push(i + 1);
           }
           $("output").value = parts.join("\n\n");
@@ -353,6 +391,7 @@
 
         let text = $("output").value;
         if (containsKorean(text)) {
+          setProgress("修正韩文残留", total, total);
           showNotice("检测到译文中仍包含韩文残留，正在尝试自动修正...");
           const fixData = await postJSON({ action: "fix", translated_text: text });
           if (fixData.fixed_text) {
@@ -391,6 +430,23 @@
       document.body.removeChild(link);
       URL.revokeObjectURL(objUrl);
     }
+
+    function switchTab(tabName) {
+      // Hide all tabs
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      
+      // Show selected tab
+      $(`[data-tab="${tabName}"]`).classList.add('active');
+      $(`${tabName}-tab`).classList.add('active');
+    }
+
+    // Tab event listeners
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        switchTab(tab.dataset.tab);
+      });
+    });
 
     $("btn-translate").addEventListener("click", translatePost);
     $("btn-download").addEventListener("click", downloadTranslation);

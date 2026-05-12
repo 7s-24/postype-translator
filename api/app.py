@@ -191,13 +191,14 @@ def translate_chunk(client, chunk, index, total, previous_translation="", retry_
     context = ""
     if previous_translation:
         context = f"""【上一段译文结尾，仅用于保持上下文一致，不要重复翻译】
-{previous_translation[-800:]}
+{previous_translation[-2000:]}
 
 """
 
     user_prompt = f"""{context}下面是韩文小说正文的第 {index}/{total} 段。
 
 请直接翻译成简体中文。注意承接上一段的人物称呼、语气、情绪和文风，但不要重复上一段内容。
+特别注意保持术语和专有名词的翻译一致性，如果之前出现过相同术语，请使用相同的翻译。
 
 【当前原文】
 {chunk}
