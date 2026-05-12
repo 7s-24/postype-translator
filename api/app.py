@@ -6,7 +6,9 @@ import json
 import os
 import re
 import time
-import urllib.parse
+import plistlib
+import base64
+import io
 
 MODEL = "qwen-plus-2025-07-28"
 MAX_CHARS = 3000
@@ -67,6 +69,18 @@ FIX_SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责修正已
 - 尽量参考上下文保持说话风格一致。
 - 只返回修正后的结果。
 """
+
+
+def parse_webarchive(data: bytes) -> str:
+    plist = plistlib.load(io.BytesIO(data))
+    webarchive = plist.get('WebArchive', {})
+    main_resource = webarchive.get('WebMainResource', {})
+    data_b64 = main_resource.get('WebResourceData')
+    if data_b64:
+        html_bytes = base64.b64decode(data_b64)
+        html = html_bytes.decode('utf-8')
+        return html
+    raise ValueError("Invalid webarchive format or no main resource")
 
 
 def parse_postype_html(html: str, section_id: str = "post-content") -> str:
@@ -289,8 +303,16 @@ class handler(BaseHTTPRequestHandler):
             action = data.get("action", "")
 
             if action == "prepare":
-                html = data.get("html", "")
-                if html:
+                fileData = data.get("fileData")
+                if fileData:
+                    if fileData['type'] == 'webarchive':
+                        binary_data = base64.b64decode(fileData['content'])
+                        html = parse_webarchive(binary_data)
+                    else:
+                        html = fileData['content']
+                    original_text = parse_postype_html(html, section_id="post-content")
+                elif data.get("html"):
+                    html = data.get("html", "")
                     original_text = parse_postype_html(html, section_id="post-content")
                 else:
                     url = data.get("url", "").strip()

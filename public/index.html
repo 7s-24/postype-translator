@@ -161,8 +161,8 @@
     </div>
 
     <div class="field">
-      <label for="file-html">或上传 Postype HTML</label>
-      <input id="file-html" type="file" accept=".html,.htm" />
+      <label for="file-html">或上传 Postype HTML 或 WebArchive</label>
+      <input id="file-html" type="file" accept=".html,.htm,.webarchive" />
     </div>
 
     <div class="actions">
@@ -224,6 +224,31 @@
       });
     }
 
+    function readFile(file) {
+      return new Promise((resolve, reject) => {
+        if (file.name.toLowerCase().endsWith('.webarchive')) {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const arrayBuffer = reader.result;
+            const uint8Array = new Uint8Array(arrayBuffer);
+            let binaryString = '';
+            for (let i = 0; i < uint8Array.length; i++) {
+              binaryString += String.fromCharCode(uint8Array[i]);
+            }
+            const base64 = btoa(binaryString);
+            resolve({ type: 'webarchive', content: base64 });
+          };
+          reader.onerror = () => reject(new Error("读取 WebArchive 文件失败。"));
+          reader.readAsArrayBuffer(file);
+        } else {
+          const reader = new FileReader();
+          reader.onload = () => resolve({ type: 'html', content: reader.result });
+          reader.onerror = () => reject(new Error("读取 HTML 文件失败。"));
+          reader.readAsText(file, "utf-8");
+        }
+      });
+    }
+
     function showNotice(msg) {
       const n = $("notice");
       n.textContent = msg;
@@ -271,8 +296,8 @@
         let prep;
 
         if (file) {
-          const html = await readFileAsText(file);
-          prep = await postJSON({ action: "prepare", html });
+          const fileData = await readFile(file);
+          prep = await postJSON({ action: "prepare", fileData });
         } else {
           prep = await postJSON({ action: "prepare", url });
         }
