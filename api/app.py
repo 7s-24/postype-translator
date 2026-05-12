@@ -145,16 +145,16 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
     def do_GET(self):
-    self._send_json(200, {
-        "ok": True,
-        "message": "Postype translator API is running. Use POST /api/translate."
-    })
+        self._send_json(200, {
+            "ok": True,
+            "message": "Postype translator API is running. Use POST /api/translate."
+        })
     
     def do_OPTIONS(self):
         self._send_json(200, {"ok": True})
