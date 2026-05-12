@@ -377,6 +377,7 @@
             previous,
           });
           parts.push(data.translated || "");
+          if (data.fallback) {
             fallbackChunks.push(i + 1);
           }
           $("output").value = parts.join("\n\n");

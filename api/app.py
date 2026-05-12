@@ -9,6 +9,7 @@ import time
 import plistlib
 import base64
 import io
+import urllib.parse
 
 MODEL = "qwen-plus-2025-07-28"
 MAX_CHARS = 3000
