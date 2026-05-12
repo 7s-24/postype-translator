@@ -2,74 +2,287 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Postype Translator</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 16px; }
-    input, button, textarea { width: 100%; box-sizing: border-box; font-size: 16px; }
-    input, textarea { padding: 10px; margin: 8px 0 16px; }
-    button { padding: 12px; cursor: pointer; }
-    textarea { height: 520px; white-space: pre-wrap; }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #fff;
+      color: #111;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .wrap {
+      max-width: 880px;
+      margin: 0 auto;
+      padding: 48px 24px 80px;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin: 0 0 32px;
+      padding-bottom: 16px;
+      border-bottom: 2px solid #111;
+    }
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #111;
+      margin: 0 0 8px;
+    }
+    input[type="url"], textarea {
+      width: 100%;
+      padding: 12px 14px;
+      font: inherit;
+      color: #111;
+      background: #fff;
+      border: 1px solid #111;
+      border-radius: 0;
+      outline: none;
+      box-shadow: none;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    input[type="url"]:focus, textarea:focus {
+      outline: 2px solid #111;
+      outline-offset: -2px;
+    }
+    textarea {
+      height: 480px;
+      resize: vertical;
+      white-space: pre-wrap;
+      font-family: inherit;
+    }
+    .field { margin-bottom: 24px; }
+    .actions {
+      display: flex;
+      gap: 0;
+      margin-bottom: 24px;
+    }
+    button {
+      flex: 0 0 auto;
+      padding: 12px 24px;
+      font: inherit;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      border: 1px solid #111;
+      border-radius: 0;
+      cursor: pointer;
+      background: #111;
+      color: #fff;
+      transition: background 0.1s, color 0.1s;
+    }
+    button + button { margin-left: -1px; }
+    button.secondary { background: #fff; color: #111; }
+    button:hover:not(:disabled) { background: #444; color: #fff; }
+    button.secondary:hover:not(:disabled) { background: #111; color: #fff; }
+    button:disabled {
+      background: #fff;
+      color: #999;
+      border-color: #ccc;
+      cursor: not-allowed;
+    }
+    .panel {
+      border: 1px solid #111;
+      padding: 16px;
+      margin-bottom: 24px;
+      background: #fafafa;
+      display: none;
+    }
+    .panel.active { display: block; }
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+    .panel-head .count {
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.04em;
+    }
+    .bar {
+      width: 100%;
+      height: 10px;
+      background: #e6e6e6;
+      position: relative;
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      background: #111;
+      width: 0%;
+      transition: width 0.25s linear;
+    }
+    .error {
+      border: 1px solid #c00;
+      padding: 12px 14px;
+      margin-bottom: 24px;
+      color: #c00;
+      font-weight: 600;
+      background: #fff;
+      display: none;
+    }
+    .error.active { display: block; }
+    @media (max-width: 560px) {
+      .wrap { padding: 32px 16px 64px; }
+      .actions { flex-direction: column; }
+      button + button { margin-left: 0; margin-top: -1px; }
+    }
   </style>
 </head>
 <body>
-  <h1>Postype Translator</h1>
+  <div class="wrap">
+    <h1>Postype Translator</h1>
 
-  <input id="url" placeholder="Postype URL" />
-  <button onclick="translatePost()">翻译</button>
-  <button onclick="downloadTranslation()">导出 TXT</button>
+    <div class="field">
+      <label for="url">原文 URL</label>
+      <input id="url" type="url" placeholder="https://..." autocomplete="off" />
+    </div>
 
-  <p id="status"></p>
-  <textarea id="output" placeholder="译文会显示在这里"></textarea>
+    <div class="actions">
+      <button id="btn-translate" type="button">翻译</button>
+      <button id="btn-download" class="secondary" type="button">导出 TXT</button>
+    </div>
+
+    <div id="error" class="error" role="alert"></div>
+
+    <div id="progress" class="panel" aria-live="polite">
+      <div class="panel-head">
+        <span id="progress-label">准备中</span>
+        <span class="count"><span id="progress-done">0</span> / <span id="progress-total">0</span></span>
+      </div>
+      <div class="bar"><div id="progress-fill" class="bar-fill"></div></div>
+    </div>
+
+    <div class="field">
+      <label for="output">译文</label>
+      <textarea id="output" placeholder="译文会显示在这里"></textarea>
+    </div>
+  </div>
 
   <script>
-    async function translatePost() {
-      const url = document.getElementById("url").value.trim();
-      const status = document.getElementById("status");
-      const output = document.getElementById("output");
+    const $ = (id) => document.getElementById(id);
 
-      status.textContent = "翻译中……";
-      output.value = "";
+    function setProgress(label, done, total) {
+      $("progress-label").textContent = label;
+      $("progress-done").textContent = String(done);
+      $("progress-total").textContent = String(total);
+      const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+      $("progress-fill").style.width = pct + "%";
+    }
+
+    function showError(msg) {
+      const e = $("error");
+      e.textContent = "错误：" + msg;
+      e.classList.add("active");
+    }
+
+    function clearError() {
+      $("error").classList.remove("active");
+    }
+
+    function setBusy(busy) {
+      $("btn-translate").disabled = busy;
+      $("btn-download").disabled = busy;
+      $("btn-translate").textContent = busy ? "翻译中…" : "翻译";
+    }
+
+    async function postJSON(body) {
+      const res = await fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) {
+        throw new Error(data.error || `请求失败 (HTTP ${res.status})`);
+      }
+      return data;
+    }
+
+    async function translatePost() {
+      const url = $("url").value.trim();
+      if (!url) {
+        showError("请输入 URL");
+        return;
+      }
+
+      clearError();
+      $("output").value = "";
+      $("progress").classList.add("active");
+      setBusy(true);
 
       try {
-        const res = await fetch("/api/translate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url })
-        });
+        setProgress("抓取原文", 0, 1);
+        const prep = await postJSON({ action: "prepare", url });
+        const chunks = prep.chunks || [];
+        const total = chunks.length;
 
-        const data = await res.json();
-
-        if (!res.ok || data.error) {
-          throw new Error(data.error || "请求失败");
+        if (total === 0) {
+          throw new Error("正文为空");
         }
 
-        status.textContent = `完成，共 ${data.chunks} 段`;
-        output.value = data.translated;
+        setProgress("翻译中", 0, total);
+        const parts = [];
+
+        for (let i = 0; i < total; i++) {
+          const previous = parts.length ? parts[parts.length - 1] : "";
+          const data = await postJSON({
+            action: "translate",
+            chunk: chunks[i],
+            index: i + 1,
+            total,
+            previous,
+          });
+          parts.push(data.translated || "");
+          $("output").value = parts.join("\n\n");
+          setProgress("翻译中", i + 1, total);
+        }
+
+        setProgress("完成", total, total);
       } catch (err) {
-        status.textContent = "失败：" + err.message;
+        showError(err.message || String(err));
+        $("progress-label").textContent = "失败";
+      } finally {
+        setBusy(false);
       }
     }
 
     function downloadTranslation() {
-      const output = document.getElementById("output");
-      const text = output.value.trim();
-
+      const text = $("output").value.trim();
       if (!text) {
-        alert("请先翻译文本，再导出。");
+        showError("请先翻译，再导出。");
         return;
       }
-
+      clearError();
       const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-
-      a.href = url;
-      a.download = "translated.txt";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      const link = document.createElement("a");
+      const objUrl = URL.createObjectURL(blob);
+      link.href = objUrl;
+      link.download = "translated.txt";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(objUrl);
     }
+
+    $("btn-translate").addEventListener("click", translatePost);
+    $("btn-download").addEventListener("click", downloadTranslation);
+    $("url").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") translatePost();
+    });
   </script>
 </body>
 </html>
