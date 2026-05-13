@@ -698,12 +698,8 @@ async function translateWithGlossary(glossary) {
     .map(g => ({ ko:g.ko, zh:g.zh, category:g.category }));
 
   try {
-    setProgress("确认模型", 0, total);
-    const status = await postJSON({ action: "model_status", fast });
-    if (status.model) {
-      showNotice(`本次从${modelTierLabel(status.tier)} ${status.model} 开始；已跳过 ${status.exhaustedModels?.length || 0} 个额度耗尽模型。`);
-    }
-
+    setProgress("准备翻译", 0, total);
+  
     setProgress("翻译中", 0, total);
     const parts = new Array(total).fill("");
     const fallbackList = [];
@@ -774,7 +770,8 @@ async function translateWithGlossary(glossary) {
 
     const notices = [];
     if (switchedModels.size) {
-      notices.push(`检测到额度耗尽，已自动切换模型：${Array.from(switchedModels, ([idx, model]) => `第 ${idx} 段→${model}`).join("；")}`);
+      console.info("Switched models:", Array.from(switchedModels.entries()));
+      notices.push("部分段落已自动切换备用模型完成翻译。");
     }
     if (fallbackList.length) {
       notices.push(`第 ${fallbackList.join(", ")} 段使用了备选翻译（机械翻译 + 术语替换）`);
