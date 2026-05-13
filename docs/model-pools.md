@@ -1,0 +1,82 @@
+# Qwen 免费额度模型池分类与轮换方案
+
+下面的分类基于用户提供的四页免费额度清单片段，优先服务“韩文小说正文 → 简体中文”的纯文本翻译场景。
+
+## 分类原则
+
+- **标准模型**：优先选择 `plus`、`max`、较大参数量的 `instruct`、长上下文 `1m`、高质量通用文本模型。它们适合普通模式、术语提取、较长段落和对文风一致性要求高的正文翻译。
+- **轻量模型**：优先选择 `flash`、`turbo`、较小参数量模型，以及翻译专用但速度优先的模型。它们适合快速模式、并发翻译和额度兜底。
+- **暂不进入自动轮换**：`vl`/视觉模型、`qvq`/强推理模型、`coder`/代码模型等可能可以处理文本，但不是小说翻译的首选；它们可以作为人工扩展候选，默认不让自动轮换消耗这些额度。
+
+## 当前已接入自动轮换的标准模型
+
+1. `qwen-plus-2025-07-28`
+2. `qwen3.6-plus`
+3. `qwen-plus`
+4. `qwen-max`
+5. `qwen-max-2025-01-25`
+6. `qwen3-max-preview`
+7. `qwen3-next-80b-a3b-thinking`
+8. `qwen3.5-35b-a3b`
+9. `qwen3-32b`
+10. `qwen3.5-27b`
+11. `qwen2.5-32b-instruct`
+12. `qwen3-14b`
+13. `qwen2.5-14b-instruct`
+14. `qwen2.5-14b-instruct-1m`
+
+## 当前已接入自动轮换的轻量模型
+
+1. `qwen-mt-flash`
+2. `qwen3.6-flash`
+3. `qwen-turbo-latest`
+4. `qwen-turbo`
+5. `qwen3-coder-flash`
+6. `qwen3-8b`
+7. `qwen2.5-7b-instruct`
+8. `qwen3-0.6b`
+
+## 已识别但默认不自动消耗的候选模型
+
+### 视觉 / 多模态模型
+
+这些模型名称包含 `vl`，更适合图像/多模态任务。纯文本翻译时不优先自动消耗：
+
+- `qwen3-vl-235b-a22b-thinking`
+- `qwen-vl-plus-2025-05-07`
+- `qwen2.5-vl-72b-instruct`
+- `qwen-vl-plus-latest`
+- `qwen2.5-vl-3b-instruct`
+- `qwen3-vl-30b-a3b-thinking`
+- `qwen-vl-max-2025-08-13`
+- `qwen-vl-plus`
+- `qwen3-vl-8b-thinking`
+- `qwen3-vl-flash-2025-10-15`
+- `qwen-vl-plus-2025-08-15`
+- `qwen-vl-max-latest`
+- `qwen3-vl-flash`
+
+### 推理 / 特化模型
+
+这些模型可能很强，但对小说翻译来说成本、速度或风格稳定性不一定最合适，默认不放入自动轮换：
+
+- `qvq-max-2025-03-25`
+- `qvq-max`
+- `qwen3-coder-plus`
+
+## 当前实现方式
+
+- 后端维护两个模型池：`STANDARD_MODELS` 和 `LIGHT_MODELS`。
+- 每次开始翻译时，前端先调用 `model_status`，确认当前模式会从哪个模型开始。
+- 术语提取固定走标准模型池，因为它对一致性和质量更敏感。
+- 普通翻译根据“快速模式”开关选择标准或轻量模型池。
+- 韩文残留修正复用对应模式的模型池。
+- 如果 API 报错被识别为额度/余额/计费相关错误，后端会把当前模型标记为已耗尽，并切换到同一模型池里的下一个模型重试。
+- 如果不是额度错误，保留原有逻辑：先尝试切小 chunk，最后才使用 Google Translate fallback。
+
+## 后续可选增强
+
+- 使用 Redis / Vercel KV / 数据库保存模型状态，避免 serverless 冷启动后丢失当前索引。
+- 增加后台页面，手动把视觉、推理、代码模型加入临时轮换。
+- 定期从 DashScope 控制台导出的额度清单同步模型池顺序。
+- 对并发快速模式增加分布式锁，避免多个 chunk 同时判定同一模型额度耗尽时发生竞争。
