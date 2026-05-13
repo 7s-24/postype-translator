@@ -78,7 +78,8 @@ function cleanGlossaryForExport(arr) {
 }
 
 function getGlossaryMode() {
-  return localStorage.getItem(GLOSSARY_MODE_KEY) || "preset";
+  const mode = localStorage.getItem(GLOSSARY_MODE_KEY);
+  return mode === "user" || mode === "preset" ? mode : "preset";
 }
 
 function setGlossaryMode(mode) {
@@ -197,6 +198,7 @@ function hasEnoughKorean(text) {
   const letters = text.match(/[\u3131-\u318E\uAC00-\uD7A3A-Za-z\u4E00-\u9FFF]/g) || [];
   return korean.length > 0 && korean.length / Math.max(letters.length, 1) >= 0.5;
 }
+
 function isWakeLockSupported() {
   return "wakeLock" in navigator && typeof navigator.wakeLock?.request === "function";
 }
@@ -206,8 +208,6 @@ async function requestWakeLock(options = {}) {
 
   if (!isWakeLockSupported()) {
     if (!auto) {
-      const box = $("wake-lock");
-      if (box) box.checked = false;
       showNotice("当前浏览器不支持画面常亮。Chrome、Edge、部分 Android 浏览器支持较好；iOS/Safari 可能不可用。");
     }
     return;
@@ -225,8 +225,6 @@ async function requestWakeLock(options = {}) {
     }
   } catch (err) {
     if (!auto) {
-      const box = $("wake-lock");
-      if (box) box.checked = false;
       showNotice("画面常亮开启失败。浏览器可能要求 HTTPS、前台页面或用户手势。");
     } else {
       console.warn("自动画面常亮开启失败", err);
@@ -243,11 +241,8 @@ async function releaseWakeLock() {
 }
 
 async function syncWakeLock() {
-  const box = $("wake-lock");
-  if (!box) return;
-
-  if ((box.checked || processingWakeLock) && document.visibilityState === "visible") {
-    await requestWakeLock({ silent: processingWakeLock && !box.checked, auto: processingWakeLock && !box.checked });
+  if (processingWakeLock && document.visibilityState === "visible") {
+    await requestWakeLock({ silent: true, auto: true });
   } else {
     await releaseWakeLock();
   }
@@ -260,10 +255,7 @@ async function beginProcessingWakeLock() {
 
 async function endProcessingWakeLock() {
   processingWakeLock = false;
-  const box = $("wake-lock");
-  if (!box || !box.checked) {
-    await releaseWakeLock();
-  }
+  await releaseWakeLock();
 }
 
 // ══════════════════════════════════════════════════════════
@@ -282,6 +274,7 @@ function loadGlossary() {
     return null;
   }
 }
+
 function saveGlossary(arr, options = {}) {
   const { switchToUser = false } = options;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
@@ -293,7 +286,10 @@ function saveGlossary(arr, options = {}) {
     updateGlossaryModeLabel();
   }
 }
-function getGlossary()     { return loadGlossary() || [...defaultGlossary]; }
+
+function getGlossary() {
+  return loadGlossary() || [...defaultGlossary];
+}
 
 function normalizeGlossary(arr) {
   if (!Array.isArray(arr)) return [];
@@ -368,7 +364,7 @@ async function loadGlossaryPresets() {
 
     const savedGlossary = loadGlossary();
     const glossaryMode = getGlossaryMode();
-    
+
     await loadGlossaryPreset(currentGlossaryPreset, {
       overwriteSaved: glossaryMode !== "user" || !savedGlossary,
       silent: true,
@@ -443,6 +439,7 @@ async function loadGlossaryPreset(id, options = {}) {
     showNotice(`已加载：${preset.name}`);
   }
 }
+
 function renderGlossaryTable() {
   const items = getGlossary();
   const tbody = $("glossary-tbody");
@@ -464,6 +461,7 @@ function renderGlossaryTable() {
   });
   updateGlossaryModeLabel();
 }
+
 function addGlossaryRow() {
   const arr = getGlossary();
   arr.push({ ko:"", zh:"", category:"其他" });
@@ -472,11 +470,18 @@ function addGlossaryRow() {
   const w = $("glossary-body").querySelector(".g-table-wrap");
   w.scrollTop = w.scrollHeight;
 }
-function delGlossaryRow(i) { const a=getGlossary(); a.splice(i,1); saveGlossary(a, { switchToUser: true }); renderGlossaryTable(); }
+
+function delGlossaryRow(i) {
+  const a = getGlossary();
+  a.splice(i, 1);
+  saveGlossary(a, { switchToUser: true });
+  renderGlossaryTable();
+}
 
 function exportGlossary() {
   downloadJSON(cleanGlossaryForExport(getGlossary()), "glossary.json");
 }
+
 $("import-file").addEventListener("change", async e => {
   const f = e.target.files[0];
   if (!f) return;
@@ -497,6 +502,7 @@ $("import-file").addEventListener("change", async e => {
 
   e.target.value = "";
 });
+
 function resetGlossary() {
   if (!confirm("确定恢复当前预设术语库？")) return;
 
@@ -507,6 +513,7 @@ function resetGlossary() {
   const preset = glossaryPresets.find(p => p.id === currentGlossaryPreset);
   showNotice(preset ? `已恢复：${preset.name}` : "已恢复默认术语库");
 }
+
 $("glossary-toggle").addEventListener("click", () => {
   $("glossary-toggle").classList.toggle("open");
   $("glossary-body").classList.toggle("open");
@@ -535,14 +542,19 @@ function renderTermsTable() {
     });
   });
 }
-function delTermRow(i) { mergedGlossary.splice(i,1); renderTermsTable(); }
 
-function addTermRow()  {
+function delTermRow(i) {
+  mergedGlossary.splice(i, 1);
+  renderTermsTable();
+}
+
+function addTermRow() {
   mergedGlossary.push({ ko:"", zh:"", category:"其他", _src:"article" });
   renderTermsTable();
   const w = $("terms-review").querySelector(".g-table-wrap");
   w.scrollTop = w.scrollHeight;
 }
+
 function exportArticleTerms() {
   const clean = cleanGlossaryForExport(mergedGlossary.filter(t => t._src === "article"));
 
@@ -554,6 +566,7 @@ function exportArticleTerms() {
   clearError();
   downloadJSON(clean, "article-terms.json");
 }
+
 function exportMergedTerms() {
   const clean = cleanGlossaryForExport(mergedGlossary);
 
@@ -565,17 +578,32 @@ function exportMergedTerms() {
   clearError();
   downloadJSON(clean, "merged-terms.json");
 }
+
 function showTermsReview(global, article) {
   const seen = new Set();
   mergedGlossary = [];
+
   // 全局术语库优先级最高，不可被篇章提取覆盖
-  for (const t of global)  { if (!t.ko) continue; seen.add(t.ko); mergedGlossary.push({...t, _src:"global"}); }
+  for (const t of global) {
+    if (!t.ko) continue;
+    seen.add(t.ko);
+    mergedGlossary.push({ ...t, _src:"global" });
+  }
+
   // 篇章提取的术语仅补充全局库中没有的
-  for (const t of article) { if (!t.ko||seen.has(t.ko)) continue; seen.add(t.ko); mergedGlossary.push({...t, _src:"article"}); }
+  for (const t of article) {
+    if (!t.ko || seen.has(t.ko)) continue;
+    seen.add(t.ko);
+    mergedGlossary.push({ ...t, _src:"article" });
+  }
+
   renderTermsTable();
   $("terms-review").classList.add("active");
 }
-function hideTermsReview() { $("terms-review").classList.remove("active"); }
+
+function hideTermsReview() {
+  $("terms-review").classList.remove("active");
+}
 
 // ══════════════════════════════════════════════════════════
 //  MAIN FLOW
@@ -587,17 +615,25 @@ async function prepareAndExtract() {
   const manual = $("manual-html").value.trim();
   const fileInput = $("file-html");
   const file = fileInput.files && fileInput.files[0];
+
   if (!url && !manual && !file) {
     showError("请输入 URL、手动粘贴正文或上传文件");
     return;
   }
+
   if (manual && !hasEnoughKorean(manual)) {
     showError("手动输入框里看起来不是韩文正文。请粘贴韩文原文。");
     return;
   }
-  if (file && file.size > 3*1024*1024) { showError("文件太大，请选择小于 3 MB 的文件"); return; }
 
-  clearError(); clearNotice(); hideTermsReview();
+  if (file && file.size > 3 * 1024 * 1024) {
+    showError("文件太大，请选择小于 3 MB 的文件");
+    return;
+  }
+
+  clearError();
+  clearNotice();
+  hideTermsReview();
   $("output").value = "";
   $("progress").classList.add("active");
   setBusy(true);
@@ -605,6 +641,7 @@ async function prepareAndExtract() {
 
   try {
     let prep;
+
     if (file) {
       setProgress("解析文件", 0, 1);
       prep = await postJSON({ action: "prepare", fileData: await readFile(file) });
@@ -615,6 +652,7 @@ async function prepareAndExtract() {
       setProgress("获取网页", 0, 1);
       prep = await postJSON({ action: "prepare", url });
     }
+
     const chunks = prep.chunks || [];
     if (!chunks.length) throw new Error("正文为空");
     pendingChunks = chunks;
@@ -644,7 +682,8 @@ async function prepareAndExtract() {
 // Phase 2: Translate
 async function translateWithGlossary(glossary) {
   hideTermsReview();
-  clearError(); clearNotice();
+  clearError();
+  clearNotice();
   $("output").value = "";
   $("progress").classList.add("active");
   setBusy(true);
@@ -653,7 +692,9 @@ async function translateWithGlossary(glossary) {
   const chunks = pendingChunks;
   const total = chunks.length;
   const fast = isFast();
-  const clean = glossary.filter(g => g.ko && g.zh).map(g => ({ ko:g.ko, zh:g.zh, category:g.category }));
+  const clean = glossary
+    .filter(g => g.ko && g.zh)
+    .map(g => ({ ko:g.ko, zh:g.zh, category:g.category }));
 
   try {
     setProgress("翻译中", 0, total);
@@ -663,11 +704,13 @@ async function translateWithGlossary(glossary) {
     if (fast && total > 1) {
       // ── PARALLEL BATCH MODE ──
       let lastPrev = "";
+
       for (let start = 0; start < total; start += BATCH_SIZE) {
         const end = Math.min(start + BATCH_SIZE, total);
-        setProgress(`翻译第 ${start+1}–${end}/${total} 段`, start, total);
+        setProgress(`翻译第 ${start + 1}–${end}/${total} 段`, start, total);
 
         const promises = [];
+
         for (let j = start; j < end; j++) {
           promises.push(
             postJSON({
@@ -683,6 +726,7 @@ async function translateWithGlossary(glossary) {
         }
 
         const results = await Promise.all(promises);
+
         for (let j = 0; j < results.length; j++) {
           const idx = start + j;
           parts[idx] = results[j].translated || "";
@@ -697,7 +741,8 @@ async function translateWithGlossary(glossary) {
       // ── SEQUENTIAL MODE ──
       for (let i = 0; i < total; i++) {
         const prev = i > 0 ? parts[i - 1] : "";
-        setProgress(`翻译第 ${i+1}/${total} 段`, i, total);
+        setProgress(`翻译第 ${i + 1}/${total} 段`, i, total);
+
         const data = await postJSON({
           action: "translate",
           chunk: chunks[i],
@@ -707,6 +752,7 @@ async function translateWithGlossary(glossary) {
           glossary: clean,
           fast: false,
         });
+
         parts[i] = data.translated || "";
         if (data.fallback) fallbackList.push(i + 1);
         $("output").value = parts.filter(Boolean).join("\n\n");
@@ -722,11 +768,18 @@ async function translateWithGlossary(glossary) {
 
     // Fix Korean residue
     let text = $("output").value;
+
     if (containsKorean(text)) {
       setProgress("修正韩文残留", total, total);
       showNotice("检测到韩文残留，正在自动修正…");
+
       const fix = await postJSON({ action: "fix", translated_text: text, fast });
-      if (fix.fixed_text) { text = fix.fixed_text; $("output").value = text; }
+
+      if (fix.fixed_text) {
+        text = fix.fixed_text;
+        $("output").value = text;
+      }
+
       showNotice(
         containsKorean(text)
           ? "修正已尝试，仍检测到韩文字符，请手动检查。"
@@ -743,50 +796,71 @@ async function translateWithGlossary(glossary) {
 }
 
 // ── Events ───────────────────────────────────────────────
-
 $("btn-translate").addEventListener("click", prepareAndExtract);
-$("btn-confirm-translate").addEventListener("click", () => translateWithGlossary(mergedGlossary));
+
+$("btn-confirm-translate").addEventListener("click", () => {
+  translateWithGlossary(mergedGlossary);
+});
+
 $("btn-skip-translate").addEventListener("click", () => {
-  translateWithGlossary(getGlossary().map(g => ({...g, _src:"global"})));
+  translateWithGlossary(getGlossary().map(g => ({ ...g, _src:"global" })));
 });
 
 $("btn-download").addEventListener("click", () => {
   const text = $("output").value.trim();
-  if (!text) { showError("请先翻译，再导出。"); return; }
+
+  if (!text) {
+    showError("请先翻译，再导出。");
+    return;
+  }
+
   clearError();
+
   const blob = new Blob([text], { type:"text/plain;charset=utf-8" });
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob); a.download = "translated.txt";
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  a.href = URL.createObjectURL(blob);
+  a.download = "translated.txt";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
   URL.revokeObjectURL(a.href);
 });
 
-$("url").addEventListener("keydown", e => { if (e.key==="Enter") prepareAndExtract(); });
+$("url").addEventListener("keydown", e => {
+  if (e.key === "Enter") prepareAndExtract();
+});
 
 // Tabs
 function clearOtherTabs(activeTab) {
   if (activeTab !== "url") {
     $("url").value = "";
   }
+
   if (activeTab !== "manual") {
     $("manual-html").value = "";
   }
+
   if (activeTab !== "file") {
     $("file-html").value = "";
   }
 }
+
 function switchTab(name) {
   const current = document.querySelector(".tab.active")?.dataset.tab;
   if (current === name) return;
+
   clearOtherTabs(name);
+
   document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
   document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
   document.querySelector(`[data-tab="${name}"]`).classList.add("active");
   $(`${name}-tab`).classList.add("active");
+
   clearError();
   clearNotice();
   hideTermsReview();
 }
+
 document.querySelectorAll(".tab").forEach(t => {
   t.addEventListener("click", () => switchTab(t.dataset.tab));
 });
@@ -805,12 +879,10 @@ $("fast-help-modal").addEventListener("click", e => {
   }
 });
 
-// $("wake-lock").addEventListener("change", syncWakeLock);
-
 document.addEventListener("visibilitychange", () => {
   syncWakeLock();
 });
-  
+
 // Help Modal
 $("help-open").addEventListener("click", () => {
   $("help-modal").classList.add("active");
@@ -828,7 +900,4 @@ $("help-modal").addEventListener("click", e => {
 
 // ── Init ─────────────────────────────────────────────────
 updateGlossaryModeLabel();
-if (!isWakeLockSupported()) {
-  $("wake-lock").title = "当前浏览器可能不支持画面常亮";
-}
 loadGlossaryPresets();
