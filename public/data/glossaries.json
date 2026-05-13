@@ -10,8 +10,8 @@
     "path": "/data/glossaries/txt.json"
   },
   {
-    "id": "zb1",
-    "name": "ZB1 术语库",
-    "path": "/data/glossaries/zb1.json"
+    "id": "nct",
+    "name": "NCT 术语库",
+    "path": "/data/glossaries/nct.json"
   }
 ]
