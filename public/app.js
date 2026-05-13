@@ -805,7 +805,7 @@ $("fast-help-modal").addEventListener("click", e => {
   }
 });
 
-$("wake-lock").addEventListener("change", syncWakeLock);
+// $("wake-lock").addEventListener("change", syncWakeLock);
 
 document.addEventListener("visibilitychange", () => {
   syncWakeLock();
