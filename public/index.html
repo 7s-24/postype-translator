@@ -80,10 +80,10 @@
         </label>
         <button id="fast-help" class="mini-help" type="button" aria-label="快速模式说明">?</button>
       </div>
-      <label class="wake-toggle" title="翻译和术语提取期间会默认保持画面常亮；勾选后，非处理期间也会尽量保持常亮。">
+      <!-- <label class="wake-toggle" title="翻译和术语提取期间会默认保持画面常亮；勾选后，非处理期间也会尽量保持常亮。">
         <input type="checkbox" id="wake-lock" />
         <span>持续常亮</span>
-      </label>
+      </label> -->
     </div>
 
     <div id="error" class="toast error" role="alert"></div>
@@ -95,7 +95,7 @@
         <span>篇章术语确认</span>
         <span class="count" id="terms-count">0 条</span>
       </div>
-      <p class="terms-hint">全局术语库条目优先级最高，不会被篇章提取覆盖。以下仅展示篇章中新发现的补充术语，请检查后开始翻译。</p>
+      <p class="terms-hint">以下为新发现的补充术语，请检查后开始翻译。</p>
       <div class="g-table-wrap" style="max-height:320px">
         <table class="g-table">
           <thead><tr>
@@ -141,9 +141,7 @@
     <h2 class="help-title">快速模式说明</h2>
 
     <div class="help-section">
-      <p>快速模式会并行翻译多个段落，通常速度更快。</p>
-      <p>非快速模式会按段落顺序逐段翻译，上下文衔接通常更稳，但耗时更长，也更容易受到普通额度限制。</p>
-      <p>如果非快速模式额度不足、请求失败或等待太久，可以切换快速模式继续尝试。</p>
+      <p>如果非快速模式额度不足，可以切换快速模式继续尝试。</p>
     </div>
 
     <div class="help-section help-note">
@@ -159,7 +157,7 @@
     <h2 class="help-title">使用方法</h2>
 
     <div class="help-section">
-      <p>这个工具用来把 Postype 韩文小说正文翻译成简体中文。</p>
+      <p>把 Postype 韩文小说正文翻译成简体中文的工具，支持翻译那个那个。</p>
       <p>是朕执意要看的，要罚就罚朕吧！</p>
     </div>
 
@@ -173,7 +171,7 @@
     </div>
 
     <div class="help-section help-note">
-      付费和成人内容不支持 URL 输入，需要手动复制粘贴文本，或者导入文件。
+      付费和成人内容不支持 URL 输入，需要手动复制粘贴文本，或者上传文件。
     </div>
 
     <div class="help-section">
@@ -186,9 +184,10 @@
     </div>
 
     <div class="help-meta">
-      <p>制作人：7s</p>
+      <p>制作：7s</p>
       <p>出现技术故障之类的问题，请联系：fedrick1plela755@gmail.com</p>
       <p>感谢 qwen 慷慨贡献的免费额度，在用完之前都会持续提供运营。</p>
+      <p>特别鸣谢提供灵感的你，希望你用得开心！</p>
     </div>
 
     <button id="help-close" class="help-close secondary" type="button">关闭</button>
