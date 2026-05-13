@@ -531,34 +531,11 @@
     </div>
 
     <div class="help-section">
-      <div class="help-section-title">翻译流程</div>
-      <ol class="help-list">
-        <li>先解析正文并切分成多个段落</li>
-        <li>翻译前会提取篇章术语</li>
-        <li>你可以检查、修改、删除或新增术语</li>
-        <li>确认后开始翻译</li>
-      </ol>
-    </div>
-
-    <div class="help-section">
-      <div class="help-section-title">术语库</div>
-      <p>全局术语库会保存在浏览器本地。清除浏览器数据可能会删除术语库。</p>
-      <p>全局术语库优先级最高，不会被篇章提取覆盖。</p>
-    </div>
-
-    <div class="help-section">
-      <div class="help-section-title">快速模式</div>
-      <p>普通模式使用质量模型。</p>
-      <p>快速模式使用快速模型，并在前端批量并发翻译。</p>
-    </div>
-
-    <div class="help-section">
       <div class="help-section-title">注意事项</div>
       <ul class="help-list">
-        <li>URL 抓取依赖页面 HTML 中的 id="post-content" 正文区域。</li>
+        <li>只适配Postype。</li>
         <li>.webarchive 文件会解析主资源中的 HTML 内容。但因为文件一般太大，所以基本是摆设状态。</li>
-        <li>翻译质量和速度会受到模型、正文长度、API 状态和网络环境影响。</li>
-        <li>如果翻译不理想，建议朴素地重试一次。</li>
+        <li>翻译质量和速度会受到不同因素的影响。如果翻译不理想，建议朴素地重试一次。</li>
       </ul>
     </div>
 
