@@ -567,6 +567,7 @@ const DEFAULT_GLOSSARY = [
   { ko:"한지훈", zh:"韩志薰", category:"本名" },
   { ko:"이경민", zh:"李炅潣", category:"本名" },
 ];
+let defaultGlossary = [...DEFAULT_GLOSSARY];
 
 // ── Utility ──────────────────────────────────────────────
 function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
@@ -640,8 +641,34 @@ function hasEnoughKorean(text) {
 // ══════════════════════════════════════════════════════════
 function loadGlossary()    { try { const r=localStorage.getItem(STORAGE_KEY); if(r) return JSON.parse(r); } catch{} return null; }
 function saveGlossary(arr) { localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); $("glossary-count").textContent=arr.length; }
-function getGlossary()     { return loadGlossary() || [...DEFAULT_GLOSSARY]; }
+function getGlossary()     { return loadGlossary() || [...defaultGlossary]; }
 
+async function loadDefaultGlossaryFile() {
+  try {
+    const res = await fetch("/data/glossary.default.json");
+    if (!res.ok) {
+      throw new Error("默认术语库读取失败");
+    }
+    const arr = await res.json();
+    if (!Array.isArray(arr)) {
+      throw new Error("默认术语库格式错误");
+    }
+    defaultGlossary = arr
+      .filter(t =>
+        t &&
+        typeof t.ko === "string" &&
+        typeof t.zh === "string"
+      )
+      .map(t => ({
+        ko: t.ko,
+        zh: t.zh,
+        category: t.category || "其他",
+      }));
+  } catch (err) {
+    console.warn(err);
+    defaultGlossary = [...DEFAULT_GLOSSARY];
+  }
+}
 function renderGlossaryTable() {
   const items = getGlossary();
   const tbody = $("glossary-tbody");
@@ -967,7 +994,9 @@ $("help-modal").addEventListener("click", e => {
 
 // ── Init ─────────────────────────────────────────────────
 if (!loadGlossary()) saveGlossary([...DEFAULT_GLOSSARY]);
-renderGlossaryTable();
+loadDefaultGlossaryFile().then(() => {
+  renderGlossaryTable();
+});
 </script>
 </body>
 </html>
