@@ -24,6 +24,7 @@ let processingWakeLock = false;
 function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
 function containsKorean(t) { return /[\u3131-\u318E\uAC00-\uD7A3]/.test(t); }
 function isFast() { return $("fast-mode").checked; }
+function modelTierLabel(tier) { return tier === "light" ? "轻量模型" : "标准模型"; }
 
 function setProgress(label, done, total) {
   $("progress-label").textContent = label;
@@ -697,9 +698,12 @@ async function translateWithGlossary(glossary) {
     .map(g => ({ ko:g.ko, zh:g.zh, category:g.category }));
 
   try {
+    setProgress("准备翻译", 0, total);
+  
     setProgress("翻译中", 0, total);
     const parts = new Array(total).fill("");
     const fallbackList = [];
+    const switchedModels = new Map();
 
     if (fast && total > 1) {
       // ── PARALLEL BATCH MODE ──
@@ -731,6 +735,7 @@ async function translateWithGlossary(glossary) {
           const idx = start + j;
           parts[idx] = results[j].translated || "";
           if (results[j].fallback) fallbackList.push(idx + 1);
+          if (results[j].switchedModel && results[j].model) switchedModels.set(idx + 1, results[j].model);
         }
 
         lastPrev = parts[end - 1];
@@ -755,6 +760,7 @@ async function translateWithGlossary(glossary) {
 
         parts[i] = data.translated || "";
         if (data.fallback) fallbackList.push(i + 1);
+        if (data.switchedModel && data.model) switchedModels.set(i + 1, data.model);
         $("output").value = parts.filter(Boolean).join("\n\n");
         setProgress("翻译中", i + 1, total);
       }
@@ -762,9 +768,15 @@ async function translateWithGlossary(glossary) {
 
     setProgress("完成", total, total);
 
-    if (fallbackList.length) {
-      showNotice(`第 ${fallbackList.join(", ")} 段使用了备选翻译（机械翻译 + 术语替换）`);
+    const notices = [];
+    if (switchedModels.size) {
+      console.info("Switched models:", Array.from(switchedModels.entries()));
+      notices.push("部分段落已自动切换备用模型完成翻译。");
     }
+    if (fallbackList.length) {
+      notices.push(`第 ${fallbackList.join(", ")} 段使用了备选翻译（机械翻译 + 术语替换）`);
+    }
+    if (notices.length) showNotice(notices.join("\n"));
 
     // Fix Korean residue
     let text = $("output").value;

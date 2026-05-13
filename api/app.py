@@ -14,9 +14,41 @@ import urllib.parse
 # ---------------------------------------------------------------------------
 # Models & config
 # ---------------------------------------------------------------------------
-MODEL_QUALITY = "qwen-plus-2025-07-28"
-MODEL_FAST    = "qwen-turbo"
+STANDARD_MODELS = [
+    # Text-first quality models from the user-provided free-quota pages.
+    "qwen-plus-2025-07-28",
+    "qwen3.6-plus",
+    "qwen-plus",
+    "qwen-max",
+    "qwen-max-2025-01-25",
+    "qwen3-max-preview",
+    "qwen3-next-80b-a3b-thinking",
+    "qwen3.5-35b-a3b",
+    "qwen3-32b",
+    "qwen3.5-27b",
+    "qwen2.5-32b-instruct",
+    "qwen3-14b",
+    "qwen2.5-14b-instruct",
+    "qwen2.5-14b-instruct-1m",
+]
+
+LIGHT_MODELS = [
+    # Faster/cheaper text models; translation-specific flash is tried first.
+    "qwen-mt-flash",
+    "qwen3.6-flash",
+    "qwen-turbo-latest",
+    "qwen-turbo",
+    "qwen3-coder-flash",
+    "qwen3-8b",
+    "qwen2.5-7b-instruct",
+    "qwen3-0.6b",
+]
+
+# Backward-compatible defaults for callers/tests that pass a single model.
+MODEL_QUALITY = STANDARD_MODELS[0]
+MODEL_FAST    = LIGHT_MODELS[0]
 MAX_CHARS     = 3000          # bigger chunks → fewer API calls
+MODEL_STATE_FILE = os.getenv("MODEL_STATE_FILE", "/tmp/postype_translator_model_state.json")
 
 ERRORS = {
     "MISSING_BODY": "缺少正文内容",
@@ -181,7 +213,9 @@ def extract_terms(client, text: str, model: str = MODEL_QUALITY) -> list:
                     "category": str(t.get("category", "其他")),
                 })
         return valid
-    except Exception:
+    except Exception as exc:
+        if is_quota_error(exc):
+            raise
         return []
 
 
@@ -224,6 +258,27 @@ def translate_by_google(text: str) -> str:
     except Exception:
         pass
     return text
+
+
+def is_quota_error(exc: Exception) -> bool:
+    """Best-effort detection for DashScope/OpenAI-compatible quota exhaustion."""
+    status_code = getattr(exc, "status_code", None)
+    code = str(getattr(exc, "code", "") or "").lower()
+    message = str(exc).lower()
+    quota_markers = (
+        "quota",
+        "free quota",
+        "insufficient_quota",
+        "insufficient quota",
+        "exceeded",
+        "balance",
+        "billing",
+        "no enough",
+        "credit",
+    )
+    if status_code in (402, 429) and any(m in message for m in quota_markers):
+        return True
+    return any(m in code or m in message for m in quota_markers)
 
 
 def split_chunk_further(chunk: str, max_chars: int = 800) -> list:
@@ -282,7 +337,9 @@ def translate_chunk(
             temperature=0.2,
         )
         return response.choices[0].message.content.strip()
-    except Exception:
+    except Exception as exc:
+        if is_quota_error(exc):
+            raise
         if retry_count == 0:
             sub_chunks = split_chunk_further(chunk)
             if len(sub_chunks) > 1:
@@ -296,7 +353,9 @@ def translate_chunk(
                                 model=model, retry_count=1,
                             )
                         )
-                    except Exception:
+                    except Exception as exc:
+                        if is_quota_error(exc):
+                            raise
                         fb = translate_by_google(sc)
                         results.append(apply_glossary_to_text(fb, glossary or []))
                 return "\n".join(results)
@@ -377,8 +436,120 @@ class handler(BaseHTTPRequestHandler):
             api_key=api_key,
         )
 
+    def _tier_name(self, data):
+        return "light" if data.get("fast") else "standard"
+
+    def _models_for_tier(self, tier):
+        return LIGHT_MODELS if tier == "light" else STANDARD_MODELS
+
+    def _load_model_state(self):
+        try:
+            with open(MODEL_STATE_FILE, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except Exception:
+            state = {}
+
+        for tier in ("standard", "light"):
+            tier_state = state.get(tier) if isinstance(state.get(tier), dict) else {}
+            tier_state.setdefault("currentIndex", 0)
+            tier_state.setdefault("exhaustedModels", [])
+            state[tier] = tier_state
+        return state
+
+    def _save_model_state(self, state):
+        try:
+            state_dir = os.path.dirname(MODEL_STATE_FILE)
+            if state_dir:
+                os.makedirs(state_dir, exist_ok=True)
+            with open(MODEL_STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _current_model_status(self, tier):
+        models = self._models_for_tier(tier)
+        state = self._load_model_state()
+        tier_state = state[tier]
+        exhausted = set(tier_state.get("exhaustedModels", []))
+        if len(exhausted) >= len(models):
+            exhausted = set()
+            tier_state["exhaustedModels"] = []
+
+        start = int(tier_state.get("currentIndex", 0)) % len(models)
+        current_index = start
+        for offset in range(len(models)):
+            idx = (start + offset) % len(models)
+            if models[idx] not in exhausted:
+                current_index = idx
+                break
+
+        tier_state["currentIndex"] = current_index
+        self._save_model_state(state)
+        return {
+            "tier": tier,
+            "model": models[current_index],
+            "currentIndex": current_index,
+            "models": models,
+            "exhaustedModels": list(tier_state.get("exhaustedModels", [])),
+        }
+
+    def _ordered_models(self, tier):
+        status = self._current_model_status(tier)
+        models = status["models"]
+        exhausted = set(status["exhaustedModels"])
+        start = status["currentIndex"]
+        active = [
+            models[(start + offset) % len(models)]
+            for offset in range(len(models))
+            if models[(start + offset) % len(models)] not in exhausted
+        ]
+        return active or models
+
+    def _mark_model_exhausted(self, tier, model):
+        models = self._models_for_tier(tier)
+        state = self._load_model_state()
+        tier_state = state[tier]
+        exhausted = tier_state.setdefault("exhaustedModels", [])
+        if model not in exhausted:
+            exhausted.append(model)
+
+        for offset in range(1, len(models) + 1):
+            idx = (models.index(model) + offset) % len(models)
+            if models[idx] not in exhausted:
+                tier_state["currentIndex"] = idx
+                break
+        else:
+            tier_state["currentIndex"] = 0
+        self._save_model_state(state)
+
+    def _run_with_model_rotation(self, tier, callback):
+        models = self._ordered_models(tier)
+        first_model = models[0]
+        last_exc = None
+
+        for model in models:
+            try:
+                result = callback(model)
+                status = self._current_model_status(tier)
+                return result, {
+                    "tier": tier,
+                    "model": model,
+                    "switchedModel": model != first_model,
+                    "currentModel": status["model"],
+                    "exhaustedModels": status["exhaustedModels"],
+                }
+            except Exception as exc:
+                if not is_quota_error(exc):
+                    raise
+                last_exc = exc
+                self._mark_model_exhausted(tier, model)
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("没有可用模型")
+
     def _pick_model(self, data):
-        return MODEL_FAST if data.get("fast") else MODEL_QUALITY
+        return self._current_model_status(self._tier_name(data))["model"]
 
     def do_POST(self):
         try:
@@ -386,6 +557,12 @@ class handler(BaseHTTPRequestHandler):
             body = self.rfile.read(length)
             data = json.loads(body.decode("utf-8"))
             action = data.get("action", "")
+
+            # === MODEL STATUS ===
+            if action == "model_status":
+                tier = self._tier_name(data)
+                status = self._current_model_status(tier)
+                return self._send_json(200, {"ok": True, **status})
 
             # === PREPARE ===
             if action == "prepare":
@@ -420,9 +597,13 @@ class handler(BaseHTTPRequestHandler):
                 client = self._get_client()
                 if not client:
                     return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
-                # Always use quality model for term extraction (runs once)
-                terms = extract_terms(client, text, model=MODEL_QUALITY)
-                return self._send_json(200, {"ok": True, "terms": terms})
+                # Term extraction is a quality-sensitive one-shot step, so use
+                # the standard model pool with quota-aware rotation.
+                terms, meta = self._run_with_model_rotation(
+                    "standard",
+                    lambda model: extract_terms(client, text, model=model),
+                )
+                return self._send_json(200, {"ok": True, "terms": terms, **meta})
 
             # === TRANSLATE ===
             if action == "translate":
@@ -431,7 +612,7 @@ class handler(BaseHTTPRequestHandler):
                 total = int(data.get("total", 1))
                 previous = data.get("previous", "")
                 glossary = data.get("glossary", [])
-                model = self._pick_model(data)
+                tier = self._tier_name(data)
 
                 if not chunk:
                     return self._send_json(400, {"error": "缺少 chunk"})
@@ -440,12 +621,15 @@ class handler(BaseHTTPRequestHandler):
                     return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
 
                 try:
-                    translated = translate_chunk(
-                        client, chunk, index, total, previous,
-                        glossary=glossary, model=model,
+                    translated, meta = self._run_with_model_rotation(
+                        tier,
+                        lambda model: translate_chunk(
+                            client, chunk, index, total, previous,
+                            glossary=glossary, model=model,
+                        ),
                     )
                     return self._send_json(200, {
-                        "ok": True, "translated": translated, "fallback": False,
+                        "ok": True, "translated": translated, "fallback": False, **meta,
                     })
                 except Exception:
                     translated = translate_by_google(chunk)
@@ -463,9 +647,12 @@ class handler(BaseHTTPRequestHandler):
                 client = self._get_client()
                 if not client:
                     return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
-                model = self._pick_model(data)
-                fixed = fix_korean_text(client, translated_text, model=model)
-                return self._send_json(200, {"ok": True, "fixed_text": fixed})
+                tier = self._tier_name(data)
+                fixed, meta = self._run_with_model_rotation(
+                    tier,
+                    lambda model: fix_korean_text(client, translated_text, model=model),
+                )
+                return self._send_json(200, {"ok": True, "fixed_text": fixed, **meta})
 
             self._send_json(400, {"error": "未知 action"})
 
