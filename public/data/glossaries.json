@@ -1,0 +1,17 @@
+[
+  {
+    "id": "tws",
+    "name": "TWS 术语库",
+    "path": "/data/glossaries/tws.json"
+  },
+  {
+    "id": "txt",
+    "name": "TXT 术语库",
+    "path": "/data/glossaries/txt.json"
+  },
+  {
+    "id": "zb1",
+    "name": "ZB1 术语库",
+    "path": "/data/glossaries/zb1.json"
+  }
+]
