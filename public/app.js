@@ -269,7 +269,19 @@ async function endProcessingWakeLock() {
 // ══════════════════════════════════════════════════════════
 //  GLOBAL GLOSSARY
 // ══════════════════════════════════════════════════════════
-function loadGlossary()    { try { const r=localStorage.getItem(STORAGE_KEY); if(r) return JSON.parse(r); } catch{} return null; }
+function loadGlossary() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+
+    const arr = JSON.parse(raw);
+    const normalized = normalizeGlossary(arr);
+
+    return normalized.length ? normalized : null;
+  } catch {
+    return null;
+  }
+}
 function saveGlossary(arr, options = {}) {
   const { switchToUser = false } = options;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
@@ -354,8 +366,11 @@ async function loadGlossaryPresets() {
 
     select.value = currentGlossaryPreset;
 
+    const savedGlossary = loadGlossary();
+    const glossaryMode = getGlossaryMode();
+    
     await loadGlossaryPreset(currentGlossaryPreset, {
-      overwriteSaved: !loadGlossary(),
+      overwriteSaved: glossaryMode !== "user" || !savedGlossary,
       silent: true,
     });
 
