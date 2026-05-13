@@ -319,7 +319,7 @@ async function loadGlossaryPresets() {
   const select = $("glossary-preset");
 
   try {
-    const res = await fetch("/data/glossaries.json");
+    const res = await fetch("data/glossaries.json");
 
     if (!res.ok) {
       throw new Error("术语库列表读取失败");

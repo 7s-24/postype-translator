@@ -2,16 +2,16 @@
   {
     "id": "tws",
     "name": "TWS 术语库",
-    "path": "/data/glossaries/tws.json"
+    "path": "data/glossaries/tws.json"
   },
   {
     "id": "txt",
     "name": "TXT 术语库",
-    "path": "/data/glossaries/txt.json"
+    "path": "data/glossaries/txt.json"
   },
   {
     "id": "nct",
     "name": "NCT 术语库",
-    "path": "/data/glossaries/nct.json"
+    "path": "data/glossaries/nct.json"
   }
 ]
