@@ -17,7 +17,7 @@ import urllib.parse
 STANDARD_MODELS = [
     # Text-first quality models from the user-provided free-quota pages.
     "qwen-plus-2025-07-28",
-    "qwen3.6-plus",
+    # "qwen3.6-plus",
     "qwen-plus",
     "qwen-max",
     "qwen-max-2025-01-25",
