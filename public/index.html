@@ -923,16 +923,33 @@ $("btn-download").addEventListener("click", () => {
 $("url").addEventListener("keydown", e => { if (e.key==="Enter") prepareAndExtract(); });
 
 // Tabs
+function clearOtherTabs(activeTab) {
+  if (activeTab !== "url") {
+    $("url").value = "";
+  }
+  if (activeTab !== "manual") {
+    $("manual-html").value = "";
+  }
+  if (activeTab !== "file") {
+    $("file-html").value = "";
+  }
+}
 function switchTab(name) {
+  const current = document.querySelector(".tab.active")?.dataset.tab;
+  if (current === name) return;
+  clearOtherTabs(name);
   document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
   document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
   document.querySelector(`[data-tab="${name}"]`).classList.add("active");
   $(`${name}-tab`).classList.add("active");
+  clearError();
+  clearNotice();
+  hideTermsReview();
 }
 document.querySelectorAll(".tab").forEach(t => {
   t.addEventListener("click", () => switchTab(t.dataset.tab));
 });
-
+  
 // Help Modal
 $("help-open").addEventListener("click", () => {
   $("help-modal").classList.add("active");
