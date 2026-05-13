@@ -16,6 +16,8 @@ const DEFAULT_GLOSSARY = [
 let defaultGlossary = [...DEFAULT_GLOSSARY];
 let glossaryPresets = [];
 let currentGlossaryPreset = "";
+let toastTimer = null;
+let wakeLock = null;
 
 // ── Utility ──────────────────────────────────────────────
 function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
@@ -28,10 +30,29 @@ function setProgress(label, done, total) {
   $("progress-total").textContent = total;
   $("progress-fill").style.width = (total > 0 ? Math.min(100, Math.round(done/total*100)) : 0) + "%";
 }
-function showError(msg)  { const e=$("error"); e.textContent="错误："+msg; e.classList.add("active"); }
+function scheduleToastAutoHide() {
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    clearNotice();
+  }, 5200);
+}
+function showError(msg)  {
+  const e=$("error");
+  e.textContent="错误："+msg;
+  e.classList.add("active");
+}
 function clearError()    { $("error").classList.remove("active"); }
-function showNotice(msg) { const n=$("notice"); n.textContent=msg; n.classList.add("active"); }
-function clearNotice()   { $("notice").classList.remove("active"); }
+function showNotice(msg) {
+  const n=$("notice");
+  n.textContent=msg;
+  n.classList.add("active");
+  scheduleToastAutoHide();
+}
+function clearNotice()   {
+  const n=$("notice");
+  n.classList.remove("active");
+  clearTimeout(toastTimer);
+}
 
 function downloadJSON(data, filename) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type:"application/json;charset=utf-8" });
@@ -175,6 +196,50 @@ function hasEnoughKorean(text) {
   const letters = text.match(/[\u3131-\u318E\uAC00-\uD7A3A-Za-z\u4E00-\u9FFF]/g) || [];
   return korean.length > 0 && korean.length / Math.max(letters.length, 1) >= 0.5;
 }
+function isWakeLockSupported() {
+  return "wakeLock" in navigator && typeof navigator.wakeLock?.request === "function";
+}
+
+async function requestWakeLock() {
+  if (!isWakeLockSupported()) {
+    const box = $("wake-lock");
+    if (box) box.checked = false;
+    showNotice("当前浏览器不支持画面常亮。Chrome、Edge、部分 Android 浏览器支持较好；iOS/Safari 可能不可用。");
+    return;
+  }
+
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    wakeLock.addEventListener("release", () => {
+      wakeLock = null;
+    });
+    showNotice("已开启画面常亮。关闭页面、锁屏或系统省电策略仍可能释放该状态。");
+  } catch (err) {
+    const box = $("wake-lock");
+    if (box) box.checked = false;
+    showNotice("画面常亮开启失败。浏览器可能要求 HTTPS、前台页面或用户手势。");
+  }
+}
+
+async function releaseWakeLock() {
+  if (!wakeLock) return;
+  try {
+    await wakeLock.release();
+  } catch {}
+  wakeLock = null;
+}
+
+async function syncWakeLock() {
+  const box = $("wake-lock");
+  if (!box) return;
+
+  if (box.checked && document.visibilityState === "visible") {
+    await requestWakeLock();
+  } else {
+    await releaseWakeLock();
+  }
+}
+
 // ══════════════════════════════════════════════════════════
 //  GLOBAL GLOSSARY
 // ══════════════════════════════════════════════════════════
@@ -679,6 +744,28 @@ function switchTab(name) {
 document.querySelectorAll(".tab").forEach(t => {
   t.addEventListener("click", () => switchTab(t.dataset.tab));
 });
+
+$("fast-help").addEventListener("click", () => {
+  $("fast-help-modal").classList.add("active");
+});
+
+$("fast-help-close").addEventListener("click", () => {
+  $("fast-help-modal").classList.remove("active");
+});
+
+$("fast-help-modal").addEventListener("click", e => {
+  if (e.target === $("fast-help-modal")) {
+    $("fast-help-modal").classList.remove("active");
+  }
+});
+
+$("wake-lock").addEventListener("change", syncWakeLock);
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && $("wake-lock").checked) {
+    requestWakeLock();
+  }
+});
   
 // Help Modal
 $("help-open").addEventListener("click", () => {
@@ -697,4 +784,7 @@ $("help-modal").addEventListener("click", e => {
 
 // ── Init ─────────────────────────────────────────────────
 updateGlossaryModeLabel();
+if (!isWakeLockSupported()) {
+  $("wake-lock").title = "当前浏览器可能不支持画面常亮";
+}
 loadGlossaryPresets();

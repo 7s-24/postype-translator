@@ -53,9 +53,6 @@
       white-space: pre-wrap;
       font-family: inherit;
     }
-    #output {
-      height: 100vh;
-    }
     .field { margin-bottom: 24px; }
 
     /* ---- actions row ---- */
@@ -95,6 +92,23 @@
       cursor: not-allowed;
     }
 
+    /* ---- compact inline controls ---- */
+    .inline-control {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .mini-help {
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border-radius: 50%;
+      font-size: 12px;
+      line-height: 1;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
     /* ---- fast mode toggle ---- */
     .fast-toggle {
       display: flex;
@@ -128,6 +142,29 @@
     .fast-toggle input:checked + .track::after { left: 18px; }
     .fast-label { color: #555; }
     .fast-toggle input:checked ~ .fast-label { color: #111; font-weight: 600; }
+
+    .wake-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 0;
+      cursor: pointer;
+      user-select: none;
+      font-size: 13px;
+      letter-spacing: normal;
+      text-transform: none;
+      color: #555;
+    }
+    .wake-toggle input {
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      accent-color: #111;
+    }
+    .wake-toggle:has(input:checked) {
+      color: #111;
+      font-weight: 600;
+    }
 
     /* ---- panels ---- */
     .panel {
@@ -165,25 +202,34 @@
       width: 0%;
       transition: width 0.25s linear;
     }
-    .error {
-      border: 1px solid #c00;
+    .toast {
+      position: fixed;
+      right: 18px;
+      top: 18px;
+      z-index: 1200;
+      display: none;
+      width: min(420px, calc(100vw - 36px));
       padding: 12px 14px;
-      margin-bottom: 24px;
+      border: 1px solid #111;
+      background: #fff;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .toast.active { display: block; }
+    .error {
+      border-color: #c00;
       color: #c00;
       font-weight: 600;
-      background: #fff;
-      display: none;
     }
-    .error.active { display: block; }
     .notice {
-      border: 1px solid #0a6;
-      padding: 12px 14px;
-      margin-bottom: 24px;
+      border-color: #0a6;
       color: #084;
       background: #f4fffb;
-      display: none;
     }
-    .notice.active { display: block; }
+    .error.active + .notice.active {
+      top: 82px;
+    }
 
     /* ---- tabs ---- */
     .tabs {
@@ -341,6 +387,10 @@
       padding: 18px;
       font: inherit;
       line-height: 1.6;
+    }
+    .small-help-box {
+      bottom: auto;
+      top: 84px;
     }
     .help-title {
       margin: 0 0 12px;

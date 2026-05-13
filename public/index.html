@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>韩文同人翻译器</title>
+  <title>Postype Translator</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -72,15 +72,22 @@
         <button id="btn-translate" type="button">翻译</button>
         <button id="btn-download" class="secondary" type="button">导出 TXT</button>
       </div>
-      <label class="fast-toggle">
-        <input type="checkbox" id="fast-mode" />
-        <span class="track"></span>
-        <span class="fast-label">快速模式</span>
+      <div class="inline-control">
+        <label class="fast-toggle">
+          <input type="checkbox" id="fast-mode" />
+          <span class="track"></span>
+          <span class="fast-label">快速模式</span>
+        </label>
+        <button id="fast-help" class="mini-help" type="button" aria-label="快速模式说明">?</button>
+      </div>
+      <label class="wake-toggle">
+        <input type="checkbox" id="wake-lock" />
+        <span>画面常亮</span>
       </label>
     </div>
 
-    <div id="error" class="error" role="alert"></div>
-    <div id="notice" class="notice" role="status"></div>
+    <div id="error" class="toast error" role="alert"></div>
+    <div id="notice" class="toast notice" role="status"></div>
 
     <!-- Article Terms Review -->
     <div id="terms-review">
@@ -128,6 +135,24 @@
     </div>
   </div>
 <button id="help-open" class="help-float" type="button">?</button>
+
+<div id="fast-help-modal" class="help-modal">
+  <div class="help-box small-help-box">
+    <h2 class="help-title">快速模式说明</h2>
+
+    <div class="help-section">
+      <p>快速模式会并行翻译多个段落，通常速度更快。</p>
+      <p>非快速模式会按段落顺序逐段翻译，上下文衔接通常更稳，但耗时更长，也更容易受到普通额度限制。</p>
+      <p>如果非快速模式额度不足、请求失败或等待太久，可以切换快速模式继续尝试。</p>
+    </div>
+
+    <div class="help-section help-note">
+      快速模式的代价是段落之间可用上下文较少，长篇剧情、称呼变化或连续对话可能需要人工检查。
+    </div>
+
+    <button id="fast-help-close" class="help-close secondary" type="button">关闭</button>
+  </div>
+</div>
 
 <div id="help-modal" class="help-modal">
   <div class="help-box">
