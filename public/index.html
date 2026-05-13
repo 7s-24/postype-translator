@@ -566,10 +566,6 @@ const DEFAULT_GLOSSARY = [
   { ko:"최영재", zh:"崔英宰", category:"本名" },
   { ko:"한지훈", zh:"韩志薰", category:"本名" },
   { ko:"이경민", zh:"李炅潣", category:"本名" },
-  { ko:"형",     zh:"哥",     category:"称呼" },
-  { ko:"선배",   zh:"前辈",   category:"称呼" },
-  { ko:"후배",   zh:"后辈",   category:"称呼" },
-  { ko:"막내",   zh:"忙内",   category:"称呼" },
 ];
 
 // ── Utility ──────────────────────────────────────────────
@@ -634,6 +630,11 @@ function catOptions(sel) {
   return CATEGORIES.map(c => `<option value="${c}"${c===sel?" selected":""}>${c}</option>`).join("");
 }
 
+function hasEnoughKorean(text) {
+  const korean = text.match(/[\u3131-\u318E\uAC00-\uD7A3]/g) || [];
+  const letters = text.match(/[\u3131-\u318E\uAC00-\uD7A3A-Za-z\u4E00-\u9FFF]/g) || [];
+  return korean.length > 0 && korean.length / Math.max(letters.length, 1) >= 0.5;
+}
 // ══════════════════════════════════════════════════════════
 //  GLOBAL GLOSSARY
 // ══════════════════════════════════════════════════════════
@@ -750,7 +751,14 @@ async function prepareAndExtract() {
   const manual = $("manual-html").value.trim();
   const fileInput = $("file-html");
   const file = fileInput.files && fileInput.files[0];
-  if (!url && !manual && !file) { showError("请输入 URL、手动粘贴正文或上传文件"); return; }
+  if (!url && !manual && !file) {
+    showError("请输入 URL、手动粘贴正文或上传文件");
+    return;
+  }
+  if (manual && !hasEnoughKorean(manual)) {
+    showError("手动输入框里看起来不是韩文正文。请粘贴韩文原文。");
+    return;
+  }
   if (file && file.size > 3*1024*1024) { showError("文件太大，请选择小于 3 MB 的文件"); return; }
 
   clearError(); clearNotice(); hideTermsReview();
