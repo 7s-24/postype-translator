@@ -313,6 +313,44 @@
     .terms-hint { font-size: 13px; color: #555; margin: 0 0 12px; }
     .terms-actions { display: flex; gap: 0; margin-top: 12px; }
     .terms-actions button { padding: 10px 20px; font-size: 14px; }
+    .help-float {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      width: 44px;
+      height: 44px;
+      padding: 0;
+      border-radius: 50%;
+      z-index: 1000;
+    }
+    .help-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 1001;
+      display: none;
+      background: rgba(0, 0, 0, 0.35);
+    }
+    .help-modal.active {
+      display: block;
+    }
+    .help-box {
+      position: absolute;
+      right: 18px;
+      bottom: 72px;
+      width: min(360px, calc(100vw - 36px));
+      max-height: calc(100vh - 120px);
+      overflow-y: auto;
+      border: 1px solid #111;
+      background: #fff;
+      padding: 16px;
+      white-space: pre-wrap;
+      font: inherit;
+      line-height: 1.6;
+    }
+    .help-close {
+      margin-top: 14px;
+      width: 100%;
+    }
   </style>
 </head>
 <body>
@@ -431,7 +469,43 @@
       <textarea id="output" placeholder="译文会显示在这里"></textarea>
     </div>
   </div>
-
+  <button id="help-open" class="help-float" type="button">?</button>
+  
+  <div id="help-modal" class="help-modal">
+    <div class="help-box">
+  使用方法
+  
+  这个工具用来把 Postype 韩文小说正文翻译成简体中文。
+  
+  输入方式有三种：
+  
+  1. 输入 Postype 页面 URL
+  2. 手动复制粘贴韩文正文
+  3. 上传 .html 或 .webarchive 文件
+  
+  付费和成人内容不支持 URL 输入，需要手动复制粘贴文本，或者导入文件。
+  
+  翻译前会先解析正文并切分成多个段落，然后提取篇章术语。你可以在篇章术语确认面板里检查、修改、删除或新增术语，再开始翻译。
+  
+  全局术语库会保存在浏览器本地。清除浏览器数据可能会删除术语库。
+  
+  快速模式会使用快速模型，并在前端批量并发翻译。普通模式使用质量模型。
+  
+  翻译质量和速度会受到模型、正文长度、API 状态和网络环境影响。如果翻译不理想，建议朴素地重试一次。
+  
+  URL 抓取依赖页面 HTML 中的 id="post-content" 正文区域。
+  
+  .webarchive 文件会解析主资源中的 HTML 内容。但因为 .webarchive 文件一般太大，所以基本是摆设状态。
+  
+  制作人：7s
+  
+  出现技术故障之类的问题，请联系：
+  fedrick1plela755@gmail.com
+  
+  感谢 qwen 慷慨贡献的免费额度，在用完之前都会持续提供运营。
+      <button id="help-close" class="help-close secondary" type="button">关闭</button>
+    </div>
+  </div>
 <script>
 const $ = id => document.getElementById(id);
 const CATEGORIES = ["人名","地名","技能","称号","物品","组织","称呼","艺名","本名","其他"];
@@ -807,6 +881,21 @@ function switchTab(name) {
 }
 document.querySelectorAll(".tab").forEach(t => {
   t.addEventListener("click", () => switchTab(t.dataset.tab));
+});
+
+// Help Modal
+$("help-open").addEventListener("click", () => {
+  $("help-modal").classList.add("active");
+});
+
+$("help-close").addEventListener("click", () => {
+  $("help-modal").classList.remove("active");
+});
+
+$("help-modal").addEventListener("click", e => {
+  if (e.target === $("help-modal")) {
+    $("help-modal").classList.remove("active");
+  }
 });
 
 // ── Init ─────────────────────────────────────────────────
