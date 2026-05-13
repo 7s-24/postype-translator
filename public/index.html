@@ -427,10 +427,13 @@
       </button>
       <div class="glossary-body" id="glossary-body">
         <div class="glossary-toolbar">
+          <select id="glossary-preset" style="padding:8px 10px;border:1px solid #111;border-radius:0;font:inherit;font-size:12px;background:#fff">
+            <option value="">加载术语库...</option>
+          </select>
           <button type="button" onclick="addGlossaryRow()">+ 添加</button>
           <button type="button" class="secondary" onclick="exportGlossary()">导出</button>
           <button type="button" class="secondary" onclick="$('import-file').click()">导入</button>
-          <button type="button" class="secondary" onclick="resetGlossary()">恢复默认</button>
+          <button type="button" class="secondary" onclick="resetGlossary()">恢复当前预设</button>
         </div>
         <div class="g-table-wrap">
           <table class="g-table">
@@ -552,6 +555,7 @@
 const $ = id => document.getElementById(id);
 const CATEGORIES = ["人名","地名","技能","称号","物品","组织","称呼","艺名","本名","其他"];
 const STORAGE_KEY = "postype_global_glossary";
+const PRESET_STORAGE_KEY = "postype_glossary_preset";
 const BATCH_SIZE = 4; // parallel concurrency
 
 const DEFAULT_GLOSSARY = [
@@ -568,6 +572,8 @@ const DEFAULT_GLOSSARY = [
   { ko:"이경민", zh:"李炅潣", category:"本名" },
 ];
 let defaultGlossary = [...DEFAULT_GLOSSARY];
+let glossaryPresets = [];
+let currentGlossaryPreset = "";
 
 // ── Utility ──────────────────────────────────────────────
 function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
@@ -643,30 +649,147 @@ function loadGlossary()    { try { const r=localStorage.getItem(STORAGE_KEY); if
 function saveGlossary(arr) { localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); $("glossary-count").textContent=arr.length; }
 function getGlossary()     { return loadGlossary() || [...defaultGlossary]; }
 
-async function loadDefaultGlossaryFile() {
+function normalizeGlossary(arr) {
+  if (!Array.isArray(arr)) return [];
+
+  return arr
+    .filter(t =>
+      t &&
+      typeof t.ko === "string" &&
+      typeof t.zh === "string"
+    )
+    .map(t => ({
+      ko: t.ko,
+      zh: t.zh,
+      category: t.category || "其他",
+    }));
+}
+
+async function fetchGlossaryFile(path) {
+  const res = await fetch(path);
+
+  if (!res.ok) {
+    throw new Error("术语库读取失败");
+  }
+
+  const arr = await res.json();
+
+  if (!Array.isArray(arr)) {
+    throw new Error("术语库格式错误");
+  }
+
+  return normalizeGlossary(arr);
+}
+
+async function loadGlossaryPresets() {
+  const select = $("glossary-preset");
+
   try {
-    const res = await fetch("/data/glossary.default.json");
+    const res = await fetch("/data/glossaries.json");
+
     if (!res.ok) {
-      throw new Error("默认术语库读取失败");
+      throw new Error("术语库列表读取失败");
     }
-    const arr = await res.json();
-    if (!Array.isArray(arr)) {
-      throw new Error("默认术语库格式错误");
+
+    const presets = await res.json();
+
+    if (!Array.isArray(presets) || presets.length === 0) {
+      throw new Error("没有可用术语库");
     }
-    defaultGlossary = arr
-      .filter(t =>
-        t &&
-        typeof t.ko === "string" &&
-        typeof t.zh === "string"
-      )
-      .map(t => ({
-        ko: t.ko,
-        zh: t.zh,
-        category: t.category || "其他",
-      }));
+
+    glossaryPresets = presets.filter(p =>
+      p &&
+      typeof p.id === "string" &&
+      typeof p.name === "string" &&
+      typeof p.path === "string"
+    );
+
+    if (!glossaryPresets.length) {
+      throw new Error("术语库列表格式错误");
+    }
+
+    select.innerHTML = glossaryPresets.map(p =>
+      `<option value="${esc(p.id)}">${esc(p.name)}</option>`
+    ).join("");
+
+    currentGlossaryPreset = localStorage.getItem(PRESET_STORAGE_KEY) || glossaryPresets[0].id;
+
+    if (!glossaryPresets.some(p => p.id === currentGlossaryPreset)) {
+      currentGlossaryPreset = glossaryPresets[0].id;
+    }
+
+    select.value = currentGlossaryPreset;
+
+    await loadGlossaryPreset(currentGlossaryPreset, {
+      overwriteSaved: !loadGlossary(),
+      silent: true,
+    });
+
+    select.addEventListener("change", async () => {
+      const nextPreset = select.value;
+
+      if (nextPreset === currentGlossaryPreset) return;
+
+      if (
+        loadGlossary() &&
+        !confirm("切换术语库会覆盖当前全局术语库。建议先导出备份。是否继续？")
+      ) {
+        select.value = currentGlossaryPreset;
+        return;
+      }
+
+      try {
+        await loadGlossaryPreset(nextPreset, {
+          overwriteSaved: true,
+          silent: false,
+        });
+      } catch (err) {
+        showError(err.message || String(err));
+        select.value = currentGlossaryPreset;
+      }
+    });
+
   } catch (err) {
     console.warn(err);
+
+    glossaryPresets = [];
+    currentGlossaryPreset = "";
     defaultGlossary = [...DEFAULT_GLOSSARY];
+
+    if (select) {
+      select.innerHTML = `<option value="">默认术语库</option>`;
+    }
+
+    if (!loadGlossary()) {
+      saveGlossary([...defaultGlossary]);
+    }
+
+    renderGlossaryTable();
+  }
+}
+
+async function loadGlossaryPreset(id, options = {}) {
+  const { overwriteSaved = false, silent = false } = options;
+  const preset = glossaryPresets.find(p => p.id === id);
+
+  if (!preset) {
+    throw new Error("术语库不存在");
+  }
+
+  const arr = await fetchGlossaryFile(preset.path);
+
+  defaultGlossary = arr;
+  currentGlossaryPreset = preset.id;
+  localStorage.setItem(PRESET_STORAGE_KEY, preset.id);
+
+  if (overwriteSaved || !loadGlossary()) {
+    saveGlossary([...defaultGlossary]);
+  }
+
+  renderGlossaryTable();
+
+  if (!silent) {
+    showNotice(`已加载：${preset.name}`);
   }
 }
 function renderGlossaryTable() {
@@ -718,8 +841,13 @@ $("import-file").addEventListener("change", async e => {
   e.target.value = "";
 });
 function resetGlossary() {
-  if (!confirm("确定恢复为默认术语库？")) return;
-  saveGlossary([...DEFAULT_GLOSSARY]); renderGlossaryTable();
+  if (!confirm("确定恢复当前预设术语库？")) return;
+
+  saveGlossary([...defaultGlossary]);
+  renderGlossaryTable();
+
+  const preset = glossaryPresets.find(p => p.id === currentGlossaryPreset);
+  showNotice(preset ? `已恢复：${preset.name}` : "已恢复默认术语库");
 }
 $("glossary-toggle").addEventListener("click", () => {
   $("glossary-toggle").classList.toggle("open");
@@ -993,10 +1121,7 @@ $("help-modal").addEventListener("click", e => {
 });
 
 // ── Init ─────────────────────────────────────────────────
-if (!loadGlossary()) saveGlossary([...DEFAULT_GLOSSARY]);
-loadDefaultGlossaryFile().then(() => {
-  renderGlossaryTable();
-});
+loadGlossaryPresets();
 </script>
 </body>
 </html>
