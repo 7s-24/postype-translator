@@ -337,15 +337,52 @@
       position: absolute;
       right: 18px;
       bottom: 72px;
-      width: min(360px, calc(100vw - 36px));
+      width: min(420px, calc(100vw - 36px));
       max-height: calc(100vh - 120px);
       overflow-y: auto;
       border: 1px solid #111;
       background: #fff;
-      padding: 16px;
-      white-space: pre-wrap;
+      padding: 18px;
       font: inherit;
       line-height: 1.6;
+    }
+    .help-title {
+      margin: 0 0 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #111;
+      font-size: 16px;
+      font-weight: 700;
+    }
+    .help-section {
+      margin: 16px 0 0;
+    }
+    .help-section-title {
+      margin: 0 0 8px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .help-box p {
+      margin: 0 0 8px;
+    }
+    .help-list {
+      margin: 0;
+      padding-left: 20px;
+    }
+    .help-list li {
+      margin: 4px 0;
+    }
+    .help-note {
+      border-left: 3px solid #111;
+      padding-left: 10px;
+      color: #444;
+    }
+    .help-meta {
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid #ddd;
+      font-size: 13px;
     }
     .help-close {
       margin-top: 14px;
@@ -469,43 +506,71 @@
       <textarea id="output" placeholder="译文会显示在这里"></textarea>
     </div>
   </div>
-  <button id="help-open" class="help-float" type="button">?</button>
-  
-  <div id="help-modal" class="help-modal">
-    <div class="help-box">
-  使用方法
-  
-  这个工具用来把 Postype 韩文小说正文翻译成简体中文。
-  
-  输入方式有三种：
-  
-  1. 输入 Postype 页面 URL
-  2. 手动复制粘贴韩文正文
-  3. 上传 .html 或 .webarchive 文件
-  
-  付费和成人内容不支持 URL 输入，需要手动复制粘贴文本，或者导入文件。
-  
-  翻译前会先解析正文并切分成多个段落，然后提取篇章术语。你可以在篇章术语确认面板里检查、修改、删除或新增术语，再开始翻译。
-  
-  全局术语库会保存在浏览器本地。清除浏览器数据可能会删除术语库。
-  
-  快速模式会使用快速模型，并在前端批量并发翻译。普通模式使用质量模型。
-  
-  翻译质量和速度会受到模型、正文长度、API 状态和网络环境影响。如果翻译不理想，建议朴素地重试一次。
-  
-  URL 抓取依赖页面 HTML 中的 id="post-content" 正文区域。
-  
-  .webarchive 文件会解析主资源中的 HTML 内容。但因为 .webarchive 文件一般太大，所以基本是摆设状态。
-  
-  制作人：7s
-  
-  出现技术故障之类的问题，请联系：
-  fedrick1plela755@gmail.com
-  
-  感谢 qwen 慷慨贡献的免费额度，在用完之前都会持续提供运营。
-      <button id="help-close" class="help-close secondary" type="button">关闭</button>
+<button id="help-open" class="help-float" type="button">?</button>
+
+<div id="help-modal" class="help-modal">
+  <div class="help-box">
+    <h2 class="help-title">使用方法</h2>
+
+    <div class="help-section">
+      <p>这个工具用来把 Postype 韩文小说正文翻译成简体中文。</p>
+      <p>是朕执意要看的，要罚就罚朕吧。</p>
     </div>
+
+    <div class="help-section">
+      <div class="help-section-title">输入方式</div>
+      <ol class="help-list">
+        <li>输入 Postype 页面 URL</li>
+        <li>手动复制粘贴韩文正文</li>
+        <li>上传 .html 或 .webarchive 文件</li>
+      </ol>
+    </div>
+
+    <div class="help-section help-note">
+      付费和成人内容不支持 URL 输入，需要手动复制粘贴文本，或者导入文件。
+    </div>
+
+    <div class="help-section">
+      <div class="help-section-title">翻译流程</div>
+      <ol class="help-list">
+        <li>先解析正文并切分成多个段落</li>
+        <li>翻译前会提取篇章术语</li>
+        <li>你可以检查、修改、删除或新增术语</li>
+        <li>确认后开始翻译</li>
+      </ol>
+    </div>
+
+    <div class="help-section">
+      <div class="help-section-title">术语库</div>
+      <p>全局术语库会保存在浏览器本地。清除浏览器数据可能会删除术语库。</p>
+      <p>全局术语库优先级最高，不会被篇章提取覆盖。</p>
+    </div>
+
+    <div class="help-section">
+      <div class="help-section-title">快速模式</div>
+      <p>普通模式使用质量模型。</p>
+      <p>快速模式使用快速模型，并在前端批量并发翻译。</p>
+    </div>
+
+    <div class="help-section">
+      <div class="help-section-title">注意事项</div>
+      <ul class="help-list">
+        <li>URL 抓取依赖页面 HTML 中的 id="post-content" 正文区域。</li>
+        <li>.webarchive 文件会解析主资源中的 HTML 内容。但因为文件一般太大，所以基本是摆设状态。</li>
+        <li>翻译质量和速度会受到模型、正文长度、API 状态和网络环境影响。</li>
+        <li>如果翻译不理想，建议朴素地重试一次。</li>
+      </ul>
+    </div>
+
+    <div class="help-meta">
+      <p>制作人：7s</p>
+      <p>出现技术故障之类的问题，请联系：fedrick1plela755@gmail.com</p>
+      <p>感谢 qwen 慷慨贡献的免费额度，在用完之前都会持续提供运营。</p>
+    </div>
+
+    <button id="help-close" class="help-close secondary" type="button">关闭</button>
   </div>
+</div>
 <script>
 const $ = id => document.getElementById(id);
 const CATEGORIES = ["人名","地名","技能","称号","物品","组织","称呼","艺名","本名","其他"];
