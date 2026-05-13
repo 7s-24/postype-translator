@@ -33,17 +33,12 @@
 
 - HTML
 - CSS
-- 原生 JavaScript
+- JavaScript
 - `localStorage`
 
 ### 后端
 
 - Python
-- `BaseHTTPRequestHandler`
-- OpenAI Python SDK
-- BeautifulSoup
-- lxml
-- requests
 
 ### 翻译模型
 
