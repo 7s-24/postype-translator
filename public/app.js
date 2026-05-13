@@ -18,6 +18,7 @@ let glossaryPresets = [];
 let currentGlossaryPreset = "";
 let toastTimer = null;
 let wakeLock = null;
+let processingWakeLock = false;
 
 // ── Utility ──────────────────────────────────────────────
 function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
@@ -200,24 +201,36 @@ function isWakeLockSupported() {
   return "wakeLock" in navigator && typeof navigator.wakeLock?.request === "function";
 }
 
-async function requestWakeLock() {
+async function requestWakeLock(options = {}) {
+  const { silent = false, auto = false } = options;
+
   if (!isWakeLockSupported()) {
-    const box = $("wake-lock");
-    if (box) box.checked = false;
-    showNotice("当前浏览器不支持画面常亮。Chrome、Edge、部分 Android 浏览器支持较好；iOS/Safari 可能不可用。");
+    if (!auto) {
+      const box = $("wake-lock");
+      if (box) box.checked = false;
+      showNotice("当前浏览器不支持画面常亮。Chrome、Edge、部分 Android 浏览器支持较好；iOS/Safari 可能不可用。");
+    }
     return;
   }
+
+  if (wakeLock) return;
 
   try {
     wakeLock = await navigator.wakeLock.request("screen");
     wakeLock.addEventListener("release", () => {
       wakeLock = null;
     });
-    showNotice("已开启画面常亮。关闭页面、锁屏或系统省电策略仍可能释放该状态。");
+    if (!silent) {
+      showNotice("已开启画面常亮。关闭页面、锁屏或系统省电策略仍可能释放该状态。");
+    }
   } catch (err) {
-    const box = $("wake-lock");
-    if (box) box.checked = false;
-    showNotice("画面常亮开启失败。浏览器可能要求 HTTPS、前台页面或用户手势。");
+    if (!auto) {
+      const box = $("wake-lock");
+      if (box) box.checked = false;
+      showNotice("画面常亮开启失败。浏览器可能要求 HTTPS、前台页面或用户手势。");
+    } else {
+      console.warn("自动画面常亮开启失败", err);
+    }
   }
 }
 
@@ -233,9 +246,22 @@ async function syncWakeLock() {
   const box = $("wake-lock");
   if (!box) return;
 
-  if (box.checked && document.visibilityState === "visible") {
-    await requestWakeLock();
+  if ((box.checked || processingWakeLock) && document.visibilityState === "visible") {
+    await requestWakeLock({ silent: processingWakeLock && !box.checked, auto: processingWakeLock && !box.checked });
   } else {
+    await releaseWakeLock();
+  }
+}
+
+async function beginProcessingWakeLock() {
+  processingWakeLock = true;
+  await syncWakeLock();
+}
+
+async function endProcessingWakeLock() {
+  processingWakeLock = false;
+  const box = $("wake-lock");
+  if (!box || !box.checked) {
     await releaseWakeLock();
   }
 }
@@ -560,6 +586,7 @@ async function prepareAndExtract() {
   $("output").value = "";
   $("progress").classList.add("active");
   setBusy(true);
+  await beginProcessingWakeLock();
 
   try {
     let prep;
@@ -583,6 +610,7 @@ async function prepareAndExtract() {
 
     $("progress").classList.remove("active");
     setBusy(false);
+    await endProcessingWakeLock();
 
     showTermsReview(getGlossary(), articleTerms);
     showNotice(
@@ -594,6 +622,7 @@ async function prepareAndExtract() {
     showError(err.message || String(err));
     $("progress-label").textContent = "失败";
     setBusy(false);
+    await endProcessingWakeLock();
   }
 }
 
@@ -604,6 +633,7 @@ async function translateWithGlossary(glossary) {
   $("output").value = "";
   $("progress").classList.add("active");
   setBusy(true);
+  await beginProcessingWakeLock();
 
   const chunks = pendingChunks;
   const total = chunks.length;
@@ -693,6 +723,7 @@ async function translateWithGlossary(glossary) {
     $("progress-label").textContent = "失败";
   } finally {
     setBusy(false);
+    await endProcessingWakeLock();
   }
 }
 
@@ -762,9 +793,7 @@ $("fast-help-modal").addEventListener("click", e => {
 $("wake-lock").addEventListener("change", syncWakeLock);
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && $("wake-lock").checked) {
-    requestWakeLock();
-  }
+  syncWakeLock();
 });
   
 // Help Modal
