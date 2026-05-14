@@ -74,7 +74,7 @@ MODEL_FAST    = LIGHT_MODELS[0]
 MAX_CHARS     = 3000          # bigger chunks → fewer API calls
 MODEL_STATE_FILE = os.getenv("MODEL_STATE_FILE", "/tmp/postype_translator_model_state.json")
 
-ERROR_ACTION = "Copy this error code and describe what happened to fedrick1plela755@gmail.com"
+ERROR_ACTION = "如果方便的话，可以复制以下的错误码，并描述错误产生的情况，提交给 fedrick1plela755@gmail.com 来帮助改进："
 
 ERRORS = {
     "MISSING_BODY": "Missing body",
