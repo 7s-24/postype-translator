@@ -48,16 +48,27 @@ function getApiError(err) {
   return null;
 }
 
+function isLoadFailedError(msg) {
+  const apiError = getApiError(msg);
+  const code = String(apiError?.code || "").toLowerCase();
+  const message = String(apiError?.message || (msg instanceof Error ? msg.message : msg) || "").toLowerCase();
+
+  return code === "loadfailed" || code === "load_failed" || message.includes("load failed");
+}
+
 function showError(msg)  {
   const e=$("error");
   const apiError = getApiError(msg);
+  const loadFailedHint = isLoadFailedError(msg)
+    ? "\n提示：翻译过程中请不要切换到其他画面、锁屏或让浏览器进入后台，否则请求可能被系统中断；请保持本页面在前台后重试。"
+    : "";
 
   if (apiError && (apiError.code || apiError.message)) {
     const code = apiError.code || "UNKNOWN_ERROR";
     const message = apiError.message || "Request failed";
-    e.textContent = `Error code: ${code}\nMessage: ${message}\n${API_ERROR_ACTION}`;
+    e.textContent = `Error code: ${code}\nMessage: ${message}${loadFailedHint}\n${API_ERROR_ACTION}`;
   } else {
-    e.textContent="错误："+(msg instanceof Error ? msg.message : msg);
+    e.textContent="错误："+(msg instanceof Error ? msg.message : msg)+loadFailedHint;
   }
 
   e.classList.add("active");
@@ -169,6 +180,7 @@ function mergeGlossaryPreferImported(current, imported) {
 
 function setBusy(busy) {
   $("btn-translate").disabled = busy;
+  $("btn-direct-translate").disabled = busy;
   $("btn-download").disabled = busy;
   $("file-html").disabled = busy;
   $("manual-html").disabled = busy;
@@ -664,7 +676,8 @@ function hideTermsReview() {
 // ══════════════════════════════════════════════════════════
 
 // Phase 1: Prepare + Extract
-async function prepareAndExtract() {
+async function prepareAndExtract(options = {}) {
+  const { skipTermExtraction = false } = options;
   const url = $("url").value.trim();
   const manual = $("manual-html").value.trim();
   const fileInput = $("file-html");
@@ -710,6 +723,11 @@ async function prepareAndExtract() {
     const chunks = prep.chunks || [];
     if (!chunks.length) throw new Error("正文为空");
     pendingChunks = chunks;
+
+    if (skipTermExtraction) {
+      await translateWithGlossary(getGlossary().map(g => ({ ...g, _src:"global" })));
+      return;
+    }
 
     setProgress("提取术语", 0, 1);
     const ext = await postJSON({ action: "extract_terms", text: chunks.join("\n\n") });
@@ -875,15 +893,13 @@ async function translateWithGlossary(glossary) {
 }
 
 // ── Events ───────────────────────────────────────────────
-$("btn-translate").addEventListener("click", prepareAndExtract);
+$("btn-translate").addEventListener("click", () => prepareAndExtract());
+$("btn-direct-translate").addEventListener("click", () => prepareAndExtract({ skipTermExtraction: true }));
 
 $("btn-confirm-translate").addEventListener("click", () => {
   translateWithGlossary(mergedGlossary);
 });
 
-$("btn-skip-translate").addEventListener("click", () => {
-  translateWithGlossary(getGlossary().map(g => ({ ...g, _src:"global" })));
-});
 
 $("btn-download").addEventListener("click", () => {
   const text = $("output").value.trim();
