@@ -16,10 +16,10 @@ import urllib.parse
 # ---------------------------------------------------------------------------
 STANDARD_MODELS = [
     # Text-first quality models from the user-provided free-quota pages.
-    "qwen-plus-2025-07-28",
+    # "qwen-plus-2025-07-28",
     # "qwen3.6-plus",
-    "qwen-plus",
-    "qwen-max",
+    # "qwen-plus",
+    # "qwen-max",
     "qwen-max-2025-01-25",
     "qwen3-max-preview",
     "qwen3-next-80b-a3b-thinking",
@@ -30,6 +30,21 @@ STANDARD_MODELS = [
     "qwen3-14b",
     "qwen2.5-14b-instruct",
     "qwen2.5-14b-instruct-1m",
+
+    # Vision-language models
+    "qwen3-vl-235b-a22b-thinking",
+    "qwen-vl-plus-2025-05-07",
+    "qwen2.5-vl-72b-instruct",
+    "qwen-vl-plus-latest",
+    "qwen2.5-vl-3b-instruct",
+    "qwen3-vl-30b-a3b-thinking",
+    "qwen-vl-max-2025-08-13",
+    "qwen-vl-plus",
+    "qwen3-vl-8b-thinking",
+    "qwen3-vl-flash-2025-10-15",
+    "qwen-vl-plus-2025-08-15",
+    "qwen-vl-max-latest",
+    "qwen3-vl-flash",
 ]
 
 LIGHT_MODELS = [
