@@ -94,6 +94,12 @@
       border-color: #ccc;
       cursor: not-allowed;
     }
+    .response-time-note {
+      margin: -14px 0 24px;
+      color: #666;
+      font-size: 13px;
+      line-height: 1.5;
+    }
 
     /* ---- compact inline controls ---- */
     .inline-control {
