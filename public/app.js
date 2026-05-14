@@ -778,14 +778,28 @@ async function translateWithGlossary(glossary) {
     }
     if (notices.length) showNotice(notices.join("\n"));
 
-    // Fix Korean residue
+    // Fix Korean residue and review fallback translation issues
     let text = $("output").value;
 
-    if (containsKorean(text)) {
-      setProgress("修正韩文残留", total, total);
-      showNotice("检测到韩文残留，正在自动修正…");
+    const needsReview = containsKorean(text) || fallbackList.length > 0;
 
-      const fix = await postJSON({ action: "fix", translated_text: text, fast });
+    if (needsReview) {
+      setProgress("修正译文问题", total, total);
+      showNotice(
+        containsKorean(text)
+          ? "检测到韩文残留，正在自动修正并复核术语/人称…"
+          : "检测到备选翻译段落，正在复核术语和人称…"
+      );
+
+      const fix = await postJSON({
+        action: "fix",
+        translated_text: text,
+        translated_chunks: parts,
+        source_chunks: chunks,
+        fallback_indices: fallbackList,
+        glossary: clean,
+        fast,
+      });
 
       if (fix.fixed_text) {
         text = fix.fixed_text;
@@ -795,7 +809,7 @@ async function translateWithGlossary(glossary) {
       showNotice(
         containsKorean(text)
           ? "修正已尝试，仍检测到韩文字符，请手动检查。"
-          : "已自动修正韩文残留，请检查译文。"
+          : "已完成译文问题复核，请检查术语和人称是否符合原文。"
       );
     }
   } catch (err) {
