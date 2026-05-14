@@ -60,7 +60,7 @@ function showError(msg)  {
   const e=$("error");
   const apiError = getApiError(msg);
   const loadFailedHint = isLoadFailedError(msg)
-    ? "\n提示：翻译过程中请不要切换到其他画面、锁屏或让浏览器进入后台，否则请求可能被系统中断；请保持本页面在前台后重试。"
+    ? "\n提示：翻译过程中请不要切换到其他画面、锁屏或让浏览器进入后台，否则请求可能被系统中断；；请保持本页面在前台后重试。"
     : "";
 
   if (apiError && (apiError.code || apiError.message)) {
