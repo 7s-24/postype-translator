@@ -24,11 +24,11 @@ from api.db import (
 # Models & config
 # ---------------------------------------------------------------------------
 STANDARD_MODELS = [
-    "qwen3.6-max-preview",
+    # "qwen3.6-max-preview",
     "qwen3-max",
     "qwen3-max-2026-01-23",
     "qwen3-max-2025-09-23",
-    "qwen3.6-plus",
+    # "qwen3.6-plus",
     "qwen3.5-plus-2026-02-15",
     "deepseek-v4-pro",
     "deepseek-v3.2",
