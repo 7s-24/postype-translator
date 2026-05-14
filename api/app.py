@@ -290,6 +290,17 @@ def build_glossary_prompt_section(glossary: list) -> str:
     return "\n".join(lines)
 
 
+def preprocess_source_with_glossary(source: str, glossary: list) -> str:
+    if not glossary:
+        return source
+    sorted_g = sorted(glossary, key=lambda g: len(g.get("ko", "")), reverse=True)
+    for item in sorted_g:
+        ko, zh = item.get("ko", ""), item.get("zh", "")
+        if ko and zh:
+            source = source.replace(ko, zh)
+    return source
+
+
 def apply_glossary_to_text(text: str, glossary: list) -> str:
     if not glossary:
         return text
@@ -413,11 +424,11 @@ def translate_chunk(
                     except Exception as exc:
                         if is_quota_error(exc):
                             raise
-                        fb = translate_by_google(sc)
-                        results.append(apply_glossary_to_text(fb, glossary or []))
+                        fallback_source = preprocess_source_with_glossary(sc, glossary or [])
+                        results.append(translate_by_google(fallback_source))
                 return "\n".join(results)
-        fallback = translate_by_google(chunk)
-        fallback = apply_glossary_to_text(fallback, glossary or [])
+        fallback_source = preprocess_source_with_glossary(chunk, glossary or [])
+        fallback = translate_by_google(fallback_source)
         if fallback and fallback != chunk:
             return fallback
         raise
@@ -808,8 +819,8 @@ class handler(BaseHTTPRequestHandler):
                         "ok": True, "translated": translated, "fallback": False, **meta,
                     })
                 except Exception:
-                    translated = translate_by_google(chunk)
-                    translated = apply_glossary_to_text(translated, glossary)
+                    fallback_source = preprocess_source_with_glossary(chunk, glossary or [])
+                    translated = translate_by_google(fallback_source)
                     return self._send_json(200, {
                         "ok": True, "translated": translated, "fallback": True,
                         "note": "此 chunk 使用了机械翻译",
