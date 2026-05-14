@@ -51,3 +51,51 @@
 - 浏览器有本地术语库，清除浏览器数据可能会删除术语库。
 - Google Translate fallback 依赖外部网络访问。正在修改成更适合大陆的连接方式。
 - 翻译质量和速度会受到模型、正文长度、API 状态和网络环境影响。如果翻译不理想，建议朴素地重试一次。
+
+## MongoDB 持久化（可选）
+
+当前前端的浏览器 `localStorage` 术语库能力保持不变；MongoDB 仅作为后端可选的数据访问层，用于后续把需要跨设备、可审核或可统计的数据保存到服务端。
+
+### 环境变量
+
+部署环境需要配置以下变量：
+
+- `MONGODB_URI`：MongoDB Atlas 或其他 MongoDB 实例连接字符串。
+- `MONGODB_DB_NAME`：应用使用的数据库名称，例如 `postype_translator`。
+
+如果没有配置这两个变量，原有翻译和本地 `localStorage` 功能仍可使用；只有调用 MongoDB 写入相关接口时会返回“MongoDB 未配置”。
+
+### 建议集合
+
+建议在 MongoDB Atlas 中创建以下集合：
+
+- `site_likes`：网页点赞统计。
+- `glossary_uploads`：用户上传的术语库草稿。
+- `glossary_entries`：审核通过后可复用的公共术语条目。
+- `events`：轻量运营事件，例如翻译开始、翻译完成、术语导入、点赞。
+
+### 本地开发
+
+1. 安装依赖：
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. 配置本地环境变量：
+
+   ```bash
+   export MONGODB_URI="mongodb+srv://<user>:<password>@<cluster>/<options>"
+   export MONGODB_DB_NAME="postype_translator"
+   ```
+
+3. 如果只是调试翻译或前端本地术语库，可以不配置 MongoDB；后端会延迟初始化数据库连接，不会影响既有 `localStorage` 流程。
+
+### 数据写入约束
+
+后端 MongoDB 写入只保存白名单字段，不会直接把完整请求体写入数据库。当前预留的写入动作包括：
+
+- `record_like`：写入或更新 `site_likes`。
+- `save_glossary_upload`：写入 `glossary_uploads` 草稿。
+- `save_glossary_entries`：写入审核通过的 `glossary_entries`。
+- `track_event`：写入 `events` 运营事件。
