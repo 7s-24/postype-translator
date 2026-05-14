@@ -154,14 +154,18 @@ EXTRACT_TERMS_PROMPT = """你是专业韩文小说术语提取器。请阅读以
 - 如果没有找到术语，返回空数组 []
 """
 
-FIX_SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责修正已经翻译文本中的韩文残留。
+FIX_SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责对已经翻译成中文的文本做最小必要修正。
 
-【修正要求】
-- 只翻译文本中的韩文部分，保留其余已经是中文的内容原样。
+【修正范围】
+- 必须修正文本中的韩文残留，把残留韩文翻译成简体中文。
+- 对照韩文原文和术语表，只检查句子中逻辑明显奇怪、称呼明显不一致或与术语表冲突的部分，修正疑似术语误译；不要借机重译通顺的句子。
+- 如果文本来自自动/谷歌翻译，请重点核对人称、称呼、说话对象和主语关系，修正明显的“我/你/他/她/他们/她们”等人称错误。
+- 无法从原文和上下文明确判断的问题，保持现有中文不变。
+
+【输出要求】
+- 保留其余已经正确的中文内容原样，尽量保留原有换行和段落结构。
 - 不要解释、不加注释、不输出前缀。
-- 不要改写本已是中文的部分。
-- 尽量参考上下文保持说话风格一致。
-- 只返回修正后的结果。
+- 只返回修正后的中文结果。
 """
 
 
@@ -438,6 +442,83 @@ def fix_korean_line(client, line, previous="", next_line="", model=MODEL_QUALITY
     return response.choices[0].message.content.strip()
 
 
+def fix_translation_chunk(
+    client,
+    source_text,
+    translated_text,
+    previous_translation="",
+    next_translation="",
+    glossary=None,
+    used_fallback=False,
+    index=1,
+    total=1,
+    model=MODEL_QUALITY,
+):
+    glossary_section = build_glossary_prompt_section(glossary) if glossary else ""
+    fallback_note = (
+        "该段曾使用自动/谷歌翻译兜底，请特别核对人称、称呼、说话对象和主语关系。"
+        if used_fallback else
+        "该段不一定来自自动翻译；如无明确错误，请尽量保持现有中文。"
+    )
+    prompt = (
+        f"下面是第 {index}/{total} 段的韩文原文和当前中文译文。请做最小必要修正。\n"
+        f"{fallback_note}\n\n"
+        f"{glossary_section}\n\n"
+        "【上一段中文译文，仅供判断人称和称呼】\n"
+        f"{previous_translation[-1200:]}\n\n"
+        "【韩文原文】\n"
+        f"{source_text}\n\n"
+        "【当前中文译文】\n"
+        f"{translated_text}\n\n"
+        "【下一段中文译文，仅供判断人称和称呼】\n"
+        f"{next_translation[:1200]}\n\n"
+        "请只输出修正后的当前中文译文。"
+    )
+    response = client.chat.completions.create(
+        model=model,
+        messages=build_chat_messages(FIX_SYSTEM_PROMPT, prompt, model),
+        temperature=0.2,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def fix_translated_chunks(
+    client,
+    source_chunks,
+    translated_chunks,
+    fallback_indices=None,
+    glossary=None,
+    model=MODEL_QUALITY,
+):
+    fallback_set = set(fallback_indices or [])
+    fixed = list(translated_chunks)
+    total = len(fixed)
+
+    for idx, translated in enumerate(translated_chunks):
+        chunk_no = idx + 1
+        used_fallback = chunk_no in fallback_set
+        if not contains_korean(translated) and not used_fallback:
+            continue
+
+        source = source_chunks[idx] if idx < len(source_chunks) else ""
+        previous_translation = fixed[idx - 1] if idx > 0 else ""
+        next_translation = translated_chunks[idx + 1] if idx < total - 1 else ""
+        fixed[idx] = fix_translation_chunk(
+            client,
+            source,
+            translated,
+            previous_translation=previous_translation,
+            next_translation=next_translation,
+            glossary=glossary,
+            used_fallback=used_fallback,
+            index=chunk_no,
+            total=total,
+            model=model,
+        )
+
+    return "\n\n".join(fixed)
+
+
 def fix_korean_text(client, text, model=MODEL_QUALITY):
     lines = text.splitlines()
     fixed = []
@@ -566,7 +647,7 @@ class handler(BaseHTTPRequestHandler):
             tier_state["currentIndex"] = 0
         self._save_model_state(state)
 
-    def _run_with_model_rotation(self, tier, callback):
+    def _run_with_model_rotation(self, tier, callback, rotate_on_bad_request=False):
         models = self._ordered_models(tier)
         first_model = models[0]
         last_exc = None
@@ -583,10 +664,14 @@ class handler(BaseHTTPRequestHandler):
                     "exhaustedModels": status["exhaustedModels"],
                 }
             except Exception as exc:
-                if not is_quota_error(exc):
-                    raise
-                last_exc = exc
-                self._mark_model_exhausted(tier, model)
+                if is_quota_error(exc):
+                    last_exc = exc
+                    self._mark_model_exhausted(tier, model)
+                    continue
+                if rotate_on_bad_request and is_bad_request_error(exc):
+                    last_exc = exc
+                    continue
+                raise
 
         if last_exc:
             raise last_exc
@@ -725,10 +810,32 @@ class handler(BaseHTTPRequestHandler):
                 if not client:
                     return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
                 tier = self._tier_name(data)
-                fixed, meta = self._run_with_model_rotation(
-                    tier,
-                    lambda model: fix_korean_text(client, translated_text, model=model),
-                )
+                source_chunks = data.get("source_chunks", [])
+                translated_chunks = data.get("translated_chunks", [])
+                fallback_indices = data.get("fallback_indices", [])
+                glossary = data.get("glossary", [])
+                if not isinstance(fallback_indices, list):
+                    fallback_indices = []
+
+                if isinstance(source_chunks, list) and isinstance(translated_chunks, list) and translated_chunks:
+                    fixed, meta = self._run_with_model_rotation(
+                        tier,
+                        lambda model: fix_translated_chunks(
+                            client,
+                            [str(chunk) for chunk in source_chunks],
+                            [str(chunk) for chunk in translated_chunks],
+                            fallback_indices=[int(i) for i in fallback_indices if str(i).isdigit()],
+                            glossary=glossary,
+                            model=model,
+                        ),
+                        rotate_on_bad_request=True,
+                    )
+                else:
+                    fixed, meta = self._run_with_model_rotation(
+                        tier,
+                        lambda model: fix_korean_text(client, translated_text, model=model),
+                        rotate_on_bad_request=True,
+                    )
                 return self._send_json(200, {"ok": True, "fixed_text": fixed, **meta})
 
             self._send_json(400, {"error": "未知 action"})
