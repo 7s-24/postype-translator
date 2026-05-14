@@ -81,6 +81,35 @@ def err(code, status=400):
         "errorCode": code,
         # 不直接暴露给用户；前端可按 errorCode 显示友好提示
     }
+
+# Models that are exposed through the OpenAI-compatible chat endpoint but reject
+# a dedicated system role. Keep prompts as a single user message for them.
+USER_ONLY_ROLE_MODEL_PREFIXES = (
+    "qwen-mt-",
+)
+
+def model_uses_user_only_messages(model: str) -> bool:
+    return any((model or "").startswith(prefix) for prefix in USER_ONLY_ROLE_MODEL_PREFIXES)
+
+def build_chat_messages(system_prompt: str, user_prompt: str, model: str) -> list:
+    if model_uses_user_only_messages(model):
+        return [{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+def is_bad_request_error(exc: Exception) -> bool:
+    return getattr(exc, "status_code", None) == 400
+
+def friendly_provider_error(exc: Exception) -> str:
+    if is_bad_request_error(exc) and not is_quota_error(exc):
+        return (
+            "当前模型无法处理该请求，可能是不支持当前消息格式或参数。"
+            "请切换模型/关闭快速模式后重试。"
+        )
+    return "翻译服务暂时不可用，请稍后重试。"
+
 # ---------------------------------------------------------------------------
 # System prompts
 # ---------------------------------------------------------------------------
@@ -207,10 +236,7 @@ def extract_terms(client, text: str, model: str = MODEL_QUALITY) -> list:
     try:
         resp = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": EXTRACT_TERMS_PROMPT},
-                {"role": "user", "content": sampled},
-            ],
+            messages=build_chat_messages(EXTRACT_TERMS_PROMPT, sampled, model),
             temperature=0.1,
         )
         raw = resp.choices[0].message.content.strip()
@@ -345,10 +371,7 @@ def translate_chunk(
     try:
         response = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
+            messages=build_chat_messages(SYSTEM_PROMPT, user_prompt, model),
             temperature=0.2,
         )
         return response.choices[0].message.content.strip()
@@ -400,10 +423,7 @@ def fix_korean_line(client, line, previous="", next_line="", model=MODEL_QUALITY
     )
     response = client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": FIX_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
+        messages=build_chat_messages(FIX_SYSTEM_PROMPT, prompt, model),
         temperature=0.2,
     )
     return response.choices[0].message.content.strip()
@@ -672,4 +692,6 @@ class handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "未知 action"})
 
         except Exception as e:
-            self._send_json(500, {"error": str(e)})
+            if is_bad_request_error(e) and not is_quota_error(e):
+                return self._send_json(400, {"ok": False, "error": friendly_provider_error(e)})
+            self._send_json(500, {"ok": False, "error": friendly_provider_error(e)})
