@@ -74,21 +74,30 @@ MODEL_FAST    = LIGHT_MODELS[0]
 MAX_CHARS     = 3000          # bigger chunks → fewer API calls
 MODEL_STATE_FILE = os.getenv("MODEL_STATE_FILE", "/tmp/postype_translator_model_state.json")
 
+ERROR_ACTION = "如果方便的话，可以复制以下的错误码，并描述错误产生的情况，提交给 fedrick1plela755@gmail.com 来帮助改进："
+
 ERRORS = {
-    "MISSING_BODY": "缺少正文内容",
-    "MISSING_INPUT": "缺少 URL 或内容",
-    "MISSING_CHUNK": "缺少 chunk",
-    "MISSING_TRANSLATED_TEXT": "缺少 translated_text",
-    "MISSING_API_KEY": "服务器未配置 DASHSCOPE_API_KEY",
-    "UNKNOWN_ACTION": "未知 action",
-    "INTERNAL_ERROR": "服务器内部错误",
+    "MISSING_BODY": "Missing body",
+    "MISSING_INPUT": "Missing URL or content",
+    "MISSING_CHUNK": "Missing chunk",
+    "MISSING_TRANSLATED_TEXT": "Missing translated_text",
+    "MISSING_API_KEY": "Server is missing DASHSCOPE_API_KEY",
+    "UNKNOWN_ACTION": "Unknown action",
+    "DATABASE_NOT_CONFIGURED": "Database is not configured",
+    "VALIDATION_ERROR": "Invalid database payload",
+    "PROVIDER_BAD_REQUEST": "The selected model could not process this request",
+    "PROVIDER_UNAVAILABLE": "Translation service is temporarily unavailable",
+    "INTERNAL_ERROR": "Internal server error",
 }
 
-def err(code, status=400):
+def error_response(code, status=400, message=None):
     return status, {
         "ok": False,
-        "errorCode": code,
-        # 不直接暴露给用户；前端可按 errorCode 显示友好提示
+        "error": {
+            "code": code,
+            "message": message or ERRORS.get(code, ERRORS["INTERNAL_ERROR"]),
+            "action": ERROR_ACTION,
+        },
     }
 
 # Models that are exposed through the OpenAI-compatible chat endpoint but reject
@@ -113,11 +122,8 @@ def is_bad_request_error(exc: Exception) -> bool:
 
 def friendly_provider_error(exc: Exception) -> str:
     if is_bad_request_error(exc) and not is_quota_error(exc):
-        return (
-            "当前模型无法处理该请求，可能是不支持当前消息格式或参数。"
-            "请切换模型/关闭快速模式后重试。"
-        )
-    return "翻译服务暂时不可用，请稍后重试。"
+        return ERRORS["PROVIDER_BAD_REQUEST"]
+    return ERRORS["PROVIDER_UNAVAILABLE"]
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -154,14 +160,18 @@ EXTRACT_TERMS_PROMPT = """你是专业韩文小说术语提取器。请阅读以
 - 如果没有找到术语，返回空数组 []
 """
 
-FIX_SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责修正已经翻译文本中的韩文残留。
+FIX_SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责对已经翻译成中文的文本做最小必要修正。
 
-【修正要求】
-- 只翻译文本中的韩文部分，保留其余已经是中文的内容原样。
+【修正范围】
+- 必须修正文本中的韩文残留，把残留韩文翻译成简体中文。
+- 对照韩文原文和术语表，只检查句子中逻辑明显奇怪、称呼明显不一致或与术语表冲突的部分，修正疑似术语误译；不要借机重译通顺的句子。
+- 如果文本来自自动/谷歌翻译，请重点核对人称、称呼、说话对象和主语关系，修正明显的“我/你/他/她/他们/她们”等人称错误。
+- 无法从原文和上下文明确判断的问题，保持现有中文不变。
+
+【输出要求】
+- 保留其余已经正确的中文内容原样，尽量保留原有换行和段落结构。
 - 不要解释、不加注释、不输出前缀。
-- 不要改写本已是中文的部分。
-- 尽量参考上下文保持说话风格一致。
-- 只返回修正后的结果。
+- 只返回修正后的中文结果。
 """
 
 
@@ -269,7 +279,18 @@ def extract_terms(client, text: str, model: str = MODEL_QUALITY) -> list:
         return []
 
 
-def build_glossary_prompt_section(glossary: list) -> str:
+def filter_glossary_for_chunk(glossary: list, chunk: str) -> list:
+    if not chunk:
+        return glossary
+    return [
+        item for item in glossary
+        if item.get("ko") and item["ko"] in chunk
+    ]
+
+
+def build_glossary_prompt_section(glossary: list, chunk=None) -> str:
+    if chunk is not None:
+        glossary = filter_glossary_for_chunk(glossary, chunk)
     if not glossary:
         return ""
     lines = ["【术语表——必须严格遵守以下译法，不得自行另译】"]
@@ -278,6 +299,17 @@ def build_glossary_prompt_section(glossary: list) -> str:
         if ko and zh:
             lines.append(f"{ko} → {zh}")
     return "\n".join(lines)
+
+
+def preprocess_source_with_glossary(source: str, glossary: list) -> str:
+    if not glossary:
+        return source
+    sorted_g = sorted(glossary, key=lambda g: len(g.get("ko", "")), reverse=True)
+    for item in sorted_g:
+        ko, zh = item.get("ko", ""), item.get("zh", "")
+        if ko and zh:
+            source = source.replace(ko, zh)
+    return source
 
 
 def apply_glossary_to_text(text: str, glossary: list) -> str:
@@ -363,7 +395,7 @@ def translate_chunk(
             f"{previous_translation[-2000:]}\n\n"
         )
 
-    glossary_section = build_glossary_prompt_section(glossary) if glossary else ""
+    glossary_section = build_glossary_prompt_section(glossary, chunk=chunk) if glossary else ""
     if glossary_section:
         glossary_section += "\n\n"
 
@@ -403,11 +435,11 @@ def translate_chunk(
                     except Exception as exc:
                         if is_quota_error(exc):
                             raise
-                        fb = translate_by_google(sc)
-                        results.append(apply_glossary_to_text(fb, glossary or []))
+                        fallback_source = preprocess_source_with_glossary(sc, glossary or [])
+                        results.append(translate_by_google(fallback_source))
                 return "\n".join(results)
-        fallback = translate_by_google(chunk)
-        fallback = apply_glossary_to_text(fallback, glossary or [])
+        fallback_source = preprocess_source_with_glossary(chunk, glossary or [])
+        fallback = translate_by_google(fallback_source)
         if fallback and fallback != chunk:
             return fallback
         raise
@@ -436,6 +468,83 @@ def fix_korean_line(client, line, previous="", next_line="", model=MODEL_QUALITY
         temperature=0.2,
     )
     return response.choices[0].message.content.strip()
+
+
+def fix_translation_chunk(
+    client,
+    source_text,
+    translated_text,
+    previous_translation="",
+    next_translation="",
+    glossary=None,
+    used_fallback=False,
+    index=1,
+    total=1,
+    model=MODEL_QUALITY,
+):
+    glossary_section = build_glossary_prompt_section(glossary, chunk=source_text) if glossary else ""
+    fallback_note = (
+        "该段曾使用自动/谷歌翻译兜底，请特别核对人称、称呼、说话对象和主语关系。"
+        if used_fallback else
+        "该段不一定来自自动翻译；如无明确错误，请尽量保持现有中文。"
+    )
+    prompt = (
+        f"下面是第 {index}/{total} 段的韩文原文和当前中文译文。请做最小必要修正。\n"
+        f"{fallback_note}\n\n"
+        f"{glossary_section}\n\n"
+        "【上一段中文译文，仅供判断人称和称呼】\n"
+        f"{previous_translation[-1200:]}\n\n"
+        "【韩文原文】\n"
+        f"{source_text}\n\n"
+        "【当前中文译文】\n"
+        f"{translated_text}\n\n"
+        "【下一段中文译文，仅供判断人称和称呼】\n"
+        f"{next_translation[:1200]}\n\n"
+        "请只输出修正后的当前中文译文。"
+    )
+    response = client.chat.completions.create(
+        model=model,
+        messages=build_chat_messages(FIX_SYSTEM_PROMPT, prompt, model),
+        temperature=0.2,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def fix_translated_chunks(
+    client,
+    source_chunks,
+    translated_chunks,
+    fallback_indices=None,
+    glossary=None,
+    model=MODEL_QUALITY,
+):
+    fallback_set = set(fallback_indices or [])
+    fixed = list(translated_chunks)
+    total = len(fixed)
+
+    for idx, translated in enumerate(translated_chunks):
+        chunk_no = idx + 1
+        used_fallback = chunk_no in fallback_set
+        if not contains_korean(translated) and not used_fallback:
+            continue
+
+        source = source_chunks[idx] if idx < len(source_chunks) else ""
+        previous_translation = fixed[idx - 1] if idx > 0 else ""
+        next_translation = translated_chunks[idx + 1] if idx < total - 1 else ""
+        fixed[idx] = fix_translation_chunk(
+            client,
+            source,
+            translated,
+            previous_translation=previous_translation,
+            next_translation=next_translation,
+            glossary=glossary,
+            used_fallback=used_fallback,
+            index=chunk_no,
+            total=total,
+            model=model,
+        )
+
+    return "\n\n".join(fixed)
 
 
 def fix_korean_text(client, text, model=MODEL_QUALITY):
@@ -566,7 +675,7 @@ class handler(BaseHTTPRequestHandler):
             tier_state["currentIndex"] = 0
         self._save_model_state(state)
 
-    def _run_with_model_rotation(self, tier, callback):
+    def _run_with_model_rotation(self, tier, callback, rotate_on_bad_request=False):
         models = self._ordered_models(tier)
         first_model = models[0]
         last_exc = None
@@ -583,10 +692,14 @@ class handler(BaseHTTPRequestHandler):
                     "exhaustedModels": status["exhaustedModels"],
                 }
             except Exception as exc:
-                if not is_quota_error(exc):
-                    raise
-                last_exc = exc
-                self._mark_model_exhausted(tier, model)
+                if is_quota_error(exc):
+                    last_exc = exc
+                    self._mark_model_exhausted(tier, model)
+                    continue
+                if rotate_on_bad_request and is_bad_request_error(exc):
+                    last_exc = exc
+                    continue
+                raise
 
         if last_exc:
             raise last_exc
@@ -604,10 +717,13 @@ class handler(BaseHTTPRequestHandler):
             result = callback()
             return self._send_json(200, {"ok": True, "data": result})
         except DatabaseNotConfigured as exc:
-            message = str(exc) or "MongoDB 未配置，请设置 MONGODB_URI 和 MONGODB_DB_NAME"
-            return self._send_json(503, {"ok": False, "error": message})
+            message = str(exc) or ERRORS["DATABASE_NOT_CONFIGURED"]
+            status, payload = error_response("DATABASE_NOT_CONFIGURED", 503, message)
+            return self._send_json(status, payload)
         except ValidationError as exc:
-            return self._send_json(400, {"ok": False, "error": str(exc)})
+            message = str(exc) or ERRORS["VALIDATION_ERROR"]
+            status, payload = error_response("VALIDATION_ERROR", 400, message)
+            return self._send_json(status, payload)
 
     def do_POST(self):
         try:
@@ -635,11 +751,13 @@ class handler(BaseHTTPRequestHandler):
                 elif data.get("text"):
                     original_text = data["text"].strip()
                     if not original_text:
-                        return self._send_json(400, {"error": "缺少正文内容"})
+                        status, payload = error_response("MISSING_BODY", 400)
+                        return self._send_json(status, payload)
                 else:
                     url = data.get("url", "").strip()
                     if not url:
-                        return self._send_json(400, {"error": "缺少 URL 或内容"})
+                        status, payload = error_response("MISSING_INPUT", 400)
+                        return self._send_json(status, payload)
                     original_text = fetch_postype_text(url)
 
                 chunks = split_text(original_text)
@@ -654,7 +772,8 @@ class handler(BaseHTTPRequestHandler):
                     return self._send_json(200, {"ok": True, "terms": []})
                 client = self._get_client()
                 if not client:
-                    return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
+                    status, payload = error_response("MISSING_API_KEY", 500)
+                    return self._send_json(status, payload)
                 # Term extraction is a quality-sensitive one-shot step, so use
                 # the standard model pool with quota-aware rotation.
                 terms, meta = self._run_with_model_rotation(
@@ -692,10 +811,12 @@ class handler(BaseHTTPRequestHandler):
                 tier = self._tier_name(data)
 
                 if not chunk:
-                    return self._send_json(400, {"error": "缺少 chunk"})
+                    status, payload = error_response("MISSING_CHUNK", 400)
+                    return self._send_json(status, payload)
                 client = self._get_client()
                 if not client:
-                    return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
+                    status, payload = error_response("MISSING_API_KEY", 500)
+                    return self._send_json(status, payload)
 
                 try:
                     translated, meta = self._run_with_model_rotation(
@@ -709,8 +830,8 @@ class handler(BaseHTTPRequestHandler):
                         "ok": True, "translated": translated, "fallback": False, **meta,
                     })
                 except Exception:
-                    translated = translate_by_google(chunk)
-                    translated = apply_glossary_to_text(translated, glossary)
+                    fallback_source = preprocess_source_with_glossary(chunk, glossary or [])
+                    translated = translate_by_google(fallback_source)
                     return self._send_json(200, {
                         "ok": True, "translated": translated, "fallback": True,
                         "note": "此 chunk 使用了机械翻译",
@@ -720,20 +841,47 @@ class handler(BaseHTTPRequestHandler):
             if action == "fix":
                 translated_text = data.get("translated_text", "")
                 if not translated_text:
-                    return self._send_json(400, {"error": "缺少 translated_text"})
+                    status, payload = error_response("MISSING_TRANSLATED_TEXT", 400)
+                    return self._send_json(status, payload)
                 client = self._get_client()
                 if not client:
-                    return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
+                    status, payload = error_response("MISSING_API_KEY", 500)
+                    return self._send_json(status, payload)
                 tier = self._tier_name(data)
-                fixed, meta = self._run_with_model_rotation(
-                    tier,
-                    lambda model: fix_korean_text(client, translated_text, model=model),
-                )
+                source_chunks = data.get("source_chunks", [])
+                translated_chunks = data.get("translated_chunks", [])
+                fallback_indices = data.get("fallback_indices", [])
+                glossary = data.get("glossary", [])
+                if not isinstance(fallback_indices, list):
+                    fallback_indices = []
+
+                if isinstance(source_chunks, list) and isinstance(translated_chunks, list) and translated_chunks:
+                    fixed, meta = self._run_with_model_rotation(
+                        tier,
+                        lambda model: fix_translated_chunks(
+                            client,
+                            [str(chunk) for chunk in source_chunks],
+                            [str(chunk) for chunk in translated_chunks],
+                            fallback_indices=[int(i) for i in fallback_indices if str(i).isdigit()],
+                            glossary=glossary,
+                            model=model,
+                        ),
+                        rotate_on_bad_request=True,
+                    )
+                else:
+                    fixed, meta = self._run_with_model_rotation(
+                        tier,
+                        lambda model: fix_korean_text(client, translated_text, model=model),
+                        rotate_on_bad_request=True,
+                    )
                 return self._send_json(200, {"ok": True, "fixed_text": fixed, **meta})
 
-            self._send_json(400, {"error": "未知 action"})
+            status, payload = error_response("UNKNOWN_ACTION", 400)
+            self._send_json(status, payload)
 
         except Exception as e:
             if is_bad_request_error(e) and not is_quota_error(e):
-                return self._send_json(400, {"ok": False, "error": friendly_provider_error(e)})
-            self._send_json(500, {"ok": False, "error": friendly_provider_error(e)})
+                status, payload = error_response("PROVIDER_BAD_REQUEST", 400, friendly_provider_error(e))
+                return self._send_json(status, payload)
+            status, payload = error_response("PROVIDER_UNAVAILABLE", 500, friendly_provider_error(e))
+            self._send_json(status, payload)
