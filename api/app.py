@@ -566,7 +566,7 @@ class handler(BaseHTTPRequestHandler):
             tier_state["currentIndex"] = 0
         self._save_model_state(state)
 
-    def _run_with_model_rotation(self, tier, callback):
+    def _run_with_model_rotation(self, tier, callback, rotate_on_bad_request=False):
         models = self._ordered_models(tier)
         first_model = models[0]
         last_exc = None
@@ -583,10 +583,14 @@ class handler(BaseHTTPRequestHandler):
                     "exhaustedModels": status["exhaustedModels"],
                 }
             except Exception as exc:
-                if not is_quota_error(exc):
-                    raise
-                last_exc = exc
-                self._mark_model_exhausted(tier, model)
+                if is_quota_error(exc):
+                    last_exc = exc
+                    self._mark_model_exhausted(tier, model)
+                    continue
+                if rotate_on_bad_request and is_bad_request_error(exc):
+                    last_exc = exc
+                    continue
+                raise
 
         if last_exc:
             raise last_exc
@@ -728,6 +732,7 @@ class handler(BaseHTTPRequestHandler):
                 fixed, meta = self._run_with_model_rotation(
                     tier,
                     lambda model: fix_korean_text(client, translated_text, model=model),
+                    rotate_on_bad_request=True,
                 )
                 return self._send_json(200, {"ok": True, "fixed_text": fixed, **meta})
 
