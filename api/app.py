@@ -279,7 +279,18 @@ def extract_terms(client, text: str, model: str = MODEL_QUALITY) -> list:
         return []
 
 
-def build_glossary_prompt_section(glossary: list) -> str:
+def filter_glossary_for_chunk(glossary: list, chunk: str) -> list:
+    if not chunk:
+        return glossary
+    return [
+        item for item in glossary
+        if item.get("ko") and item["ko"] in chunk
+    ]
+
+
+def build_glossary_prompt_section(glossary: list, chunk=None) -> str:
+    if chunk is not None:
+        glossary = filter_glossary_for_chunk(glossary, chunk)
     if not glossary:
         return ""
     lines = ["【术语表——必须严格遵守以下译法，不得自行另译】"]
@@ -373,7 +384,7 @@ def translate_chunk(
             f"{previous_translation[-2000:]}\n\n"
         )
 
-    glossary_section = build_glossary_prompt_section(glossary) if glossary else ""
+    glossary_section = build_glossary_prompt_section(glossary, chunk=chunk) if glossary else ""
     if glossary_section:
         glossary_section += "\n\n"
 
@@ -460,7 +471,7 @@ def fix_translation_chunk(
     total=1,
     model=MODEL_QUALITY,
 ):
-    glossary_section = build_glossary_prompt_section(glossary) if glossary else ""
+    glossary_section = build_glossary_prompt_section(glossary, chunk=source_text) if glossary else ""
     fallback_note = (
         "该段曾使用自动/谷歌翻译兜底，请特别核对人称、称呼、说话对象和主语关系。"
         if used_fallback else
