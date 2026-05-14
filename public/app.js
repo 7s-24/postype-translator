@@ -38,9 +38,28 @@ function scheduleToastAutoHide() {
     clearNotice();
   }, 5200);
 }
+const API_ERROR_ACTION = "Please copy the error code and describe what happened to fedrick1plela755@gmail.com";
+
+function getApiError(err) {
+  if (err && typeof err === "object") {
+    if (err.apiError) return err.apiError;
+    if (err.code || err.action) return err;
+  }
+  return null;
+}
+
 function showError(msg)  {
   const e=$("error");
-  e.textContent="错误："+msg;
+  const apiError = getApiError(msg);
+
+  if (apiError && (apiError.code || apiError.message)) {
+    const code = apiError.code || "UNKNOWN_ERROR";
+    const message = apiError.message || "Request failed";
+    e.textContent = `Error code: ${code}\nMessage: ${message}\n${API_ERROR_ACTION}`;
+  } else {
+    e.textContent="错误："+(msg instanceof Error ? msg.message : msg);
+  }
+
   e.classList.add("active");
 }
 function clearError()    { $("error").classList.remove("active"); }
@@ -179,6 +198,34 @@ function readFile(file) {
   });
 }
 
+function makeApiError(error, fallbackCode, fallbackMessage) {
+  let apiError;
+
+  if (error && typeof error === "object") {
+    apiError = {
+      code: error.code || fallbackCode,
+      message: error.message || fallbackMessage,
+      action: error.action || API_ERROR_ACTION,
+    };
+  } else if (typeof error === "string" && error.trim()) {
+    apiError = {
+      code: fallbackCode,
+      message: error,
+      action: API_ERROR_ACTION,
+    };
+  } else {
+    apiError = {
+      code: fallbackCode,
+      message: fallbackMessage,
+      action: API_ERROR_ACTION,
+    };
+  }
+
+  const err = new Error(`${apiError.code}: ${apiError.message}`);
+  err.apiError = apiError;
+  return err;
+}
+
 async function postJSON(body) {
   const res = await fetch("/api/translate", {
     method: "POST",
@@ -186,7 +233,13 @@ async function postJSON(body) {
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.error) throw new Error(data.error || `请求失败 (HTTP ${res.status})`);
+  const fallbackCode = res.ok ? "API_ERROR" : `HTTP_${res.status}`;
+  const fallbackMessage = res.ok ? "Request failed" : `Request failed (HTTP ${res.status})`;
+
+  if (!res.ok || data.ok === false || data.error) {
+    throw makeApiError(data.error, fallbackCode, fallbackMessage);
+  }
+
   return data;
 }
 
@@ -391,7 +444,7 @@ async function loadGlossaryPresets() {
         });
         setGlossaryMode("preset");
       } catch (err) {
-        showError(err.message || String(err));
+        showError(err);
         select.value = currentGlossaryPreset;
       }
     });
@@ -673,7 +726,7 @@ async function prepareAndExtract() {
         : `未检测到新术语（共 ${chunks.length} 段），将使用全局术语库。请确认后开始翻译。`
     );
   } catch (err) {
-    showError(err.message || String(err));
+    showError(err);
     $("progress-label").textContent = "失败";
     setBusy(false);
     await endProcessingWakeLock();
@@ -813,7 +866,7 @@ async function translateWithGlossary(glossary) {
       );
     }
   } catch (err) {
-    showError(err.message || String(err));
+    showError(err);
     $("progress-label").textContent = "失败";
   } finally {
     setBusy(false);

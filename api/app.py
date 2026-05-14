@@ -74,21 +74,30 @@ MODEL_FAST    = LIGHT_MODELS[0]
 MAX_CHARS     = 3000          # bigger chunks → fewer API calls
 MODEL_STATE_FILE = os.getenv("MODEL_STATE_FILE", "/tmp/postype_translator_model_state.json")
 
+ERROR_ACTION = "如果方便的话，可以复制以下的错误码，并描述错误产生的情况，提交给 fedrick1plela755@gmail.com 来帮助改进："
+
 ERRORS = {
-    "MISSING_BODY": "缺少正文内容",
-    "MISSING_INPUT": "缺少 URL 或内容",
-    "MISSING_CHUNK": "缺少 chunk",
-    "MISSING_TRANSLATED_TEXT": "缺少 translated_text",
-    "MISSING_API_KEY": "服务器未配置 DASHSCOPE_API_KEY",
-    "UNKNOWN_ACTION": "未知 action",
-    "INTERNAL_ERROR": "服务器内部错误",
+    "MISSING_BODY": "Missing body",
+    "MISSING_INPUT": "Missing URL or content",
+    "MISSING_CHUNK": "Missing chunk",
+    "MISSING_TRANSLATED_TEXT": "Missing translated_text",
+    "MISSING_API_KEY": "Server is missing DASHSCOPE_API_KEY",
+    "UNKNOWN_ACTION": "Unknown action",
+    "DATABASE_NOT_CONFIGURED": "Database is not configured",
+    "VALIDATION_ERROR": "Invalid database payload",
+    "PROVIDER_BAD_REQUEST": "The selected model could not process this request",
+    "PROVIDER_UNAVAILABLE": "Translation service is temporarily unavailable",
+    "INTERNAL_ERROR": "Internal server error",
 }
 
-def err(code, status=400):
+def error_response(code, status=400, message=None):
     return status, {
         "ok": False,
-        "errorCode": code,
-        # 不直接暴露给用户；前端可按 errorCode 显示友好提示
+        "error": {
+            "code": code,
+            "message": message or ERRORS.get(code, ERRORS["INTERNAL_ERROR"]),
+            "action": ERROR_ACTION,
+        },
     }
 
 # Models that are exposed through the OpenAI-compatible chat endpoint but reject
@@ -113,11 +122,8 @@ def is_bad_request_error(exc: Exception) -> bool:
 
 def friendly_provider_error(exc: Exception) -> str:
     if is_bad_request_error(exc) and not is_quota_error(exc):
-        return (
-            "当前模型无法处理该请求，可能是不支持当前消息格式或参数。"
-            "请切换模型/关闭快速模式后重试。"
-        )
-    return "翻译服务暂时不可用，请稍后重试。"
+        return ERRORS["PROVIDER_BAD_REQUEST"]
+    return ERRORS["PROVIDER_UNAVAILABLE"]
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -689,10 +695,13 @@ class handler(BaseHTTPRequestHandler):
             result = callback()
             return self._send_json(200, {"ok": True, "data": result})
         except DatabaseNotConfigured as exc:
-            message = str(exc) or "MongoDB 未配置，请设置 MONGODB_URI 和 MONGODB_DB_NAME"
-            return self._send_json(503, {"ok": False, "error": message})
+            message = str(exc) or ERRORS["DATABASE_NOT_CONFIGURED"]
+            status, payload = error_response("DATABASE_NOT_CONFIGURED", 503, message)
+            return self._send_json(status, payload)
         except ValidationError as exc:
-            return self._send_json(400, {"ok": False, "error": str(exc)})
+            message = str(exc) or ERRORS["VALIDATION_ERROR"]
+            status, payload = error_response("VALIDATION_ERROR", 400, message)
+            return self._send_json(status, payload)
 
     def do_POST(self):
         try:
@@ -720,11 +729,13 @@ class handler(BaseHTTPRequestHandler):
                 elif data.get("text"):
                     original_text = data["text"].strip()
                     if not original_text:
-                        return self._send_json(400, {"error": "缺少正文内容"})
+                        status, payload = error_response("MISSING_BODY", 400)
+                        return self._send_json(status, payload)
                 else:
                     url = data.get("url", "").strip()
                     if not url:
-                        return self._send_json(400, {"error": "缺少 URL 或内容"})
+                        status, payload = error_response("MISSING_INPUT", 400)
+                        return self._send_json(status, payload)
                     original_text = fetch_postype_text(url)
 
                 chunks = split_text(original_text)
@@ -739,7 +750,8 @@ class handler(BaseHTTPRequestHandler):
                     return self._send_json(200, {"ok": True, "terms": []})
                 client = self._get_client()
                 if not client:
-                    return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
+                    status, payload = error_response("MISSING_API_KEY", 500)
+                    return self._send_json(status, payload)
                 # Term extraction is a quality-sensitive one-shot step, so use
                 # the standard model pool with quota-aware rotation.
                 terms, meta = self._run_with_model_rotation(
@@ -777,10 +789,12 @@ class handler(BaseHTTPRequestHandler):
                 tier = self._tier_name(data)
 
                 if not chunk:
-                    return self._send_json(400, {"error": "缺少 chunk"})
+                    status, payload = error_response("MISSING_CHUNK", 400)
+                    return self._send_json(status, payload)
                 client = self._get_client()
                 if not client:
-                    return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
+                    status, payload = error_response("MISSING_API_KEY", 500)
+                    return self._send_json(status, payload)
 
                 try:
                     translated, meta = self._run_with_model_rotation(
@@ -805,10 +819,12 @@ class handler(BaseHTTPRequestHandler):
             if action == "fix":
                 translated_text = data.get("translated_text", "")
                 if not translated_text:
-                    return self._send_json(400, {"error": "缺少 translated_text"})
+                    status, payload = error_response("MISSING_TRANSLATED_TEXT", 400)
+                    return self._send_json(status, payload)
                 client = self._get_client()
                 if not client:
-                    return self._send_json(500, {"error": "服务器未配置 DASHSCOPE_API_KEY"})
+                    status, payload = error_response("MISSING_API_KEY", 500)
+                    return self._send_json(status, payload)
                 tier = self._tier_name(data)
                 source_chunks = data.get("source_chunks", [])
                 translated_chunks = data.get("translated_chunks", [])
@@ -838,9 +854,12 @@ class handler(BaseHTTPRequestHandler):
                     )
                 return self._send_json(200, {"ok": True, "fixed_text": fixed, **meta})
 
-            self._send_json(400, {"error": "未知 action"})
+            status, payload = error_response("UNKNOWN_ACTION", 400)
+            self._send_json(status, payload)
 
         except Exception as e:
             if is_bad_request_error(e) and not is_quota_error(e):
-                return self._send_json(400, {"ok": False, "error": friendly_provider_error(e)})
-            self._send_json(500, {"ok": False, "error": friendly_provider_error(e)})
+                status, payload = error_response("PROVIDER_BAD_REQUEST", 400, friendly_provider_error(e))
+                return self._send_json(status, payload)
+            status, payload = error_response("PROVIDER_UNAVAILABLE", 500, friendly_provider_error(e))
+            self._send_json(status, payload)
