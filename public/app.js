@@ -1015,6 +1015,8 @@ async function translateWithGlossary(glossary) {
     setProgress("翻译中", 0, total);
     const parts = new Array(total).fill("");
     const fallbackList = [];
+    const sensitiveFallbackList = [];
+    const googleFallbackList = [];
     const switchedModels = new Map();
 
     if (fast && total > 1) {
@@ -1047,7 +1049,14 @@ async function translateWithGlossary(glossary) {
         for (let j = 0; j < results.length; j++) {
           const idx = start + j;
           parts[idx] = results[j].translated || "";
-          if (results[j].fallback) fallbackList.push(idx + 1);
+          if (results[j].fallback) {
+            fallbackList.push(idx + 1);
+            if (results[j].fallbackType === "sensitive_model") {
+              sensitiveFallbackList.push(idx + 1);
+            } else if (results[j].fallbackType === "google") {
+              googleFallbackList.push(idx + 1);
+            }
+          }
           if (results[j].modelOrder) setModelOrderDisplay(results[j]);
           if (results[j].switchedModel && results[j].model) switchedModels.set(idx + 1, results[j].model);
         }
@@ -1074,7 +1083,14 @@ async function translateWithGlossary(glossary) {
         });
 
         parts[i] = data.translated || "";
-        if (data.fallback) fallbackList.push(i + 1);
+        if (data.fallback) {
+          fallbackList.push(i + 1);
+          if (data.fallbackType === "sensitive_model") {
+            sensitiveFallbackList.push(i + 1);
+          } else if (data.fallbackType === "google") {
+            googleFallbackList.push(i + 1);
+          }
+        }
         if (data.modelOrder) setModelOrderDisplay(data);
         if (data.switchedModel && data.model) switchedModels.set(i + 1, data.model);
         $("output").value = parts.filter(Boolean).join("\n\n");
@@ -1089,8 +1105,17 @@ async function translateWithGlossary(glossary) {
       console.info("Switched models:", Array.from(switchedModels.entries()));
       notices.push("部分段落已自动切换备用模型完成翻译。");
     }
-    if (fallbackList.length) {
-      notices.push(`第 ${fallbackList.join(", ")} 段使用了备选翻译（机械翻译 + 术语替换）`);
+    if (sensitiveFallbackList.length) {
+      notices.push(`第 ${sensitiveFallbackList.join(", ")} 段已切换敏感内容兼容模型完成翻译`);
+    }
+    if (googleFallbackList.length) {
+      notices.push(`第 ${googleFallbackList.join(", ")} 段使用了备选翻译（机械翻译 + 术语替换）`);
+    }
+    const untypedFallbackList = fallbackList.filter(
+      index => !sensitiveFallbackList.includes(index) && !googleFallbackList.includes(index)
+    );
+    if (untypedFallbackList.length) {
+      notices.push(`第 ${untypedFallbackList.join(", ")} 段使用了备选翻译`);
     }
     if (notices.length) showNotice(notices.join("\n"));
 
