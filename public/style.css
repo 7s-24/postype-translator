@@ -69,6 +69,7 @@
     .actions-row .btns {
       display: flex;
       gap: 0;
+      flex-wrap: wrap;
     }
     button {
       flex: 0 0 auto;
