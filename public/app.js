@@ -1138,6 +1138,7 @@ async function translateWithGlossary(glossary) {
         translated_chunks: parts,
         source_chunks: chunks,
         fallback_indices: fallbackList,
+        google_fallback_indices: googleFallbackList,
         glossary: clean,
         fast,
         modelSessionId: currentModelSessionId,
