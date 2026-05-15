@@ -424,8 +424,39 @@
       font-size: 16px;
       font-weight: 700;
     }
+    .help-tabs {
+      display: flex;
+      gap: 14px;
+      margin: 0 0 14px;
+      border-bottom: 1px solid #ddd;
+    }
+    .help-tab {
+      appearance: none;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      background: none;
+      padding: 0 0 8px;
+      color: #777;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .help-tab.active {
+      border-bottom-color: #111;
+      color: #111;
+    }
+    .help-tab-panel {
+      display: none;
+    }
+    .help-tab-panel.active {
+      display: block;
+    }
+    .help-tab-panel .help-section:first-child {
+      margin-top: 0;
+    }
     .help-section {
-      margin: 16px 0 0;
+      margin: 14px 0 0;
     }
     .help-section-title {
       margin: 0 0 8px;

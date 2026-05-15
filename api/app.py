@@ -186,6 +186,7 @@ FIX_SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责对已经
 - 必须修正文本中的韩文残留，把残留韩文翻译成简体中文。
 - 对照韩文原文和术语表，只检查句子中逻辑明显奇怪、称呼明显不一致或与术语表冲突的部分，修正疑似术语误译；不要借机重译通顺的句子。
 - 如果文本来自自动/谷歌翻译，请重点核对人称、称呼、说话对象和主语关系，修正明显的“我/你/他/她/他们/她们”等人称错误。
+- 尤其检查谷歌翻译擅自补出的不必要主语；原文没有明确主语、中文省略也自然时，优先删掉多余主语。
 - 无法从原文和上下文明确判断的问题，保持现有中文不变。
 
 【输出要求】
@@ -347,6 +348,13 @@ def apply_glossary_to_text(text: str, glossary: list) -> str:
 # Translation
 # ---------------------------------------------------------------------------
 
+class TranslationText(str):
+    def __new__(cls, value: str, used_google: bool = False):
+        obj = str.__new__(cls, value)
+        obj.used_google = used_google
+        return obj
+
+
 def translate_by_google(text: str) -> str:
     try:
         url = "https://translate.googleapis.com/translate_a/single"
@@ -360,6 +368,13 @@ def translate_by_google(text: str) -> str:
     except Exception:
         pass
     return text
+
+
+def translate_by_google_with_glossary(text: str, glossary: list) -> str:
+    glossary = glossary or []
+    prepared = preprocess_source_with_glossary(text, glossary)
+    translated = translate_by_google(prepared)
+    return apply_glossary_to_text(translated, glossary)
 
 
 def is_quota_error(exc: Exception) -> bool:
@@ -455,13 +470,15 @@ def translate_chunk(
                     except Exception as exc:
                         if is_quota_error(exc):
                             raise
-                        fallback_source = preprocess_source_with_glossary(sc, glossary or [])
-                        results.append(translate_by_google(fallback_source))
-                return "\n".join(results)
-        fallback_source = preprocess_source_with_glossary(chunk, glossary or [])
-        fallback = translate_by_google(fallback_source)
+                        fallback = translate_by_google_with_glossary(sc, glossary or [])
+                        results.append(TranslationText(fallback, used_google=True))
+                return TranslationText(
+                    "\n".join(results),
+                    used_google=any(getattr(result, "used_google", False) for result in results),
+                )
+        fallback = translate_by_google_with_glossary(chunk, glossary or [])
         if fallback and fallback != chunk:
-            return fallback
+            return TranslationText(fallback, used_google=True)
         raise
 
 
@@ -870,12 +887,16 @@ class handler(BaseHTTPRequestHandler):
                         ),
                         model_session_id=model_session_id,
                     )
+                    used_google = bool(getattr(translated, "used_google", False))
                     return self._send_json(200, {
-                        "ok": True, "translated": translated, "fallback": False, **meta,
+                        "ok": True,
+                        "translated": str(translated),
+                        "fallback": used_google,
+                        "note": "此 chunk 使用了机械翻译" if used_google else "",
+                        **meta,
                     })
                 except Exception:
-                    fallback_source = preprocess_source_with_glossary(chunk, glossary or [])
-                    translated = translate_by_google(fallback_source)
+                    translated = translate_by_google_with_glossary(chunk, glossary or [])
                     return self._send_json(200, {
                         "ok": True, "translated": translated, "fallback": True,
                         "note": "此 chunk 使用了机械翻译",

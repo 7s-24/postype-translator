@@ -1148,6 +1148,21 @@ $("help-modal").addEventListener("click", e => {
   }
 });
 
+function switchHelpTab(name) {
+  document.querySelectorAll(".help-tab").forEach(tab => {
+    const active = tab.dataset.helpTab === name;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  document.querySelectorAll(".help-tab-panel").forEach(panel => {
+    panel.classList.toggle("active", panel.id === `help-${name}-panel`);
+  });
+}
+
+document.querySelectorAll(".help-tab").forEach(tab => {
+  tab.addEventListener("click", () => switchHelpTab(tab.dataset.helpTab));
+});
+
 // ══════════════════════════════════════════════════════════
 //  SITE LIKE
 // ══════════════════════════════════════════════════════════
