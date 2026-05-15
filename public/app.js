@@ -254,12 +254,34 @@ function makeApiError(error, fallbackCode, fallbackMessage) {
   return err;
 }
 
-async function postJSON(body) {
-  const res = await fetch("/api/translate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+async function postJSON(body, options = {}) {
+  const { timeoutMs = 0 } = options;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timer = controller
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : null;
+
+  let res;
+  try {
+    res = await fetch("/api/translate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller?.signal,
+    });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw makeApiError(
+        { code: "REQUEST_TIMEOUT", message: "请求超时，请稍后重试或直接跳过术语提取。" },
+        "REQUEST_TIMEOUT",
+        "Request timed out"
+      );
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+
   const data = await res.json().catch(() => ({}));
   const fallbackCode = res.ok ? "API_ERROR" : `HTTP_${res.status}`;
   const fallbackMessage = res.ok ? "Request failed" : `Request failed (HTTP ${res.status})`;
@@ -962,7 +984,7 @@ async function prepareAndExtract(options = {}) {
       action: "extract_terms",
       text: chunks.join("\n\n"),
       modelSessionId: currentModelSessionId,
-    });
+    }, { timeoutMs: 120000 });
     setModelOrderDisplay(ext);
     const articleTerms = ext.terms || [];
 

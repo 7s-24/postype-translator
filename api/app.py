@@ -94,6 +94,9 @@ MODEL_QUALITY = STANDARD_MODELS[0]
 MODEL_FAST    = LIGHT_MODELS[0]
 MAX_CHARS     = 3000          # bigger chunks → fewer API calls
 MODEL_STATE_FILE = os.getenv("MODEL_STATE_FILE", "/tmp/postype_translator_model_state.json")
+DASHSCOPE_API_TIMEOUT_SECONDS = float(os.getenv("DASHSCOPE_API_TIMEOUT_SECONDS", "60"))
+TERM_EXTRACTION_TIMEOUT_SECONDS = float(os.getenv("TERM_EXTRACTION_TIMEOUT_SECONDS", "45"))
+DASHSCOPE_MAX_RETRIES = int(os.getenv("DASHSCOPE_MAX_RETRIES", "0"))
 
 ERROR_ACTION = "如果方便的话，可以复制以下的错误码，并描述错误产生的情况，提交给 fedrick1plela755@gmail.com 来帮助改进："
 
@@ -503,6 +506,7 @@ def extract_terms(client, text: str, model: str = MODEL_QUALITY) -> list:
         model=model,
         messages=build_chat_messages(EXTRACT_TERMS_PROMPT, prompt, model),
         temperature=0.1,
+        timeout=TERM_EXTRACTION_TIMEOUT_SECONDS,
     )
     raw = resp.choices[0].message.content.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -1002,6 +1006,8 @@ class handler(BaseHTTPRequestHandler):
         return OpenAI(
             base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
             api_key=api_key,
+            timeout=DASHSCOPE_API_TIMEOUT_SECONDS,
+            max_retries=DASHSCOPE_MAX_RETRIES,
         )
 
     def _tier_name(self, data):
