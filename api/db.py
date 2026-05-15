@@ -116,7 +116,7 @@ def sanitize_site_like(payload):
     """Whitelist and normalize a site-like write payload."""
     page_url = _normalize_url(_require_string(payload, "pageUrl", 2048))
     delta = _optional_int(payload, "delta", minimum=-1, maximum=1)
-    if delta == 0 or delta is None:
+    if delta is None:
         delta = 1
     sanitized = {
         "pageUrl": page_url,

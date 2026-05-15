@@ -51,6 +51,7 @@
           <button type="button" class="secondary" onclick="exportGlossary()">导出</button>
           <button type="button" class="secondary" onclick="$('import-file').click()">导入</button>
           <button type="button" class="secondary" onclick="resetGlossary()">恢复当前预设</button>
+          <button type="button" class="secondary" id="btn-submit-glossary" onclick="submitGlossaryUpload('global')">提交术语库</button>
         </div>
         <div class="g-table-wrap">
           <table class="g-table">
@@ -116,6 +117,7 @@
         <button type="button" onclick="addTermRow()" style="padding:6px 12px;font-size:12px">+ 添加术语</button>
         <button type="button" class="secondary" onclick="exportArticleTerms()" style="padding:6px 12px;font-size:12px">导出篇章术语</button>
         <button type="button" class="secondary" onclick="exportMergedTerms()" style="padding:6px 12px;font-size:12px">导出本次术语</button>
+        <button type="button" class="secondary" id="btn-submit-terms" onclick="submitGlossaryUpload('article')" style="padding:6px 12px;font-size:12px">提交篇章术语</button>
       </div>
       <div class="terms-actions">
         <button type="button" id="btn-confirm-translate">确认并翻译</button>
@@ -199,9 +201,10 @@
   </div>
 </div>
 
-<button id="site-like" class="like-float" type="button" aria-label="点赞这个工具" style="opacity:0;">
+<button id="site-like" class="like-float" type="button" aria-label="给这个工具送出 Kudos">
+  <span class="like-label">Kudos</span>
   <span class="like-icon">♡</span>
-  <span class="like-count" id="like-count">·</span>
+  <span class="like-count" id="like-count">0</span>
 </button>
 <script src="app.js" defer></script>
 </body>
