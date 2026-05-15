@@ -178,6 +178,14 @@ function mergeGlossaryPreferImported(current, imported) {
   return Array.from(map.values());
 }
 
+function isTermsReviewOpen() {
+  return $("terms-review").classList.contains("active");
+}
+
+function updateExtractButtonLabel() {
+  $("btn-translate").textContent = isTermsReviewOpen() ? "重新提取术语" : "提取术语并翻译";
+}
+
 function setBusy(busy) {
   $("btn-translate").disabled = busy;
   $("btn-direct-translate").disabled = busy;
@@ -186,7 +194,12 @@ function setBusy(busy) {
   $("manual-html").disabled = busy;
   $("url").disabled = busy;
   $("fast-mode").disabled = busy;
-  $("btn-translate").textContent = busy ? "处理中…" : "重新提取术语";
+
+  if (busy) {
+    $("btn-translate").textContent = "处理中…";
+  } else {
+    updateExtractButtonLabel();
+  }
 }
 
 function readFile(file) {
@@ -705,10 +718,12 @@ function showTermsReview(global, article) {
 
   renderTermsTable();
   $("terms-review").classList.add("active");
+  updateExtractButtonLabel();
 }
 
 function hideTermsReview() {
   $("terms-review").classList.remove("active");
+  updateExtractButtonLabel();
 }
 
 // ══════════════════════════════════════════════════════════
