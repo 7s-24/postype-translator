@@ -92,7 +92,7 @@ SENSITIVE_FALLBACK_MODELS = [
 # Backward-compatible defaults for callers/tests that pass a single model.
 MODEL_QUALITY = STANDARD_MODELS[0]
 MODEL_FAST    = LIGHT_MODELS[0]
-MAX_CHARS     = 3000          # bigger chunks → fewer API calls
+MAX_CHARS     = 1500
 MODEL_STATE_FILE = os.getenv("MODEL_STATE_FILE", "/tmp/postype_translator_model_state.json")
 
 ERROR_ACTION = "如果方便的话，可以复制以下的错误码，并描述错误产生的情况，提交给 fedrick1plela755@gmail.com 来帮助改进："
@@ -485,7 +485,7 @@ def build_term_translation_prompt(text: str, candidates: list) -> str:
         else:
             suffix = f"（出现 {count} 次）"
         candidate_lines.append(f"- {token}{suffix}")
-    sampled = sample_text(text, max_chars=6000)
+    sampled = sample_text(text, max_chars=3000)
     return (
         "【候选高频词】\n"
         + "\n".join(candidate_lines)
