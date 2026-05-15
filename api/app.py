@@ -65,7 +65,7 @@ LIGHT_MODELS = [
     "qwen3.6-flash-2026-04-16",
     "qwen3.6-flash",
     "qwen3.5-flash-2026-02-23",
-    "qwen3.5-flash",
+    # "qwen3.5-flash",
 ]
 
 SENSITIVE_FALLBACK_MODELS = [
@@ -84,9 +84,9 @@ SENSITIVE_FALLBACK_MODELS = [
     "qwen3-vl-30b-a3b-instruct",
     "qwen3-vl-30b-a3b-thinking",
     "qwen3-vl-8b-instruct",
-    "qwen3.5-plus-2026-04-20",
-    "qwen3.6-27b",
-    "qwen3.6-max-preview",
+    # "qwen3.5-plus-2026-04-20",
+    # "qwen3.6-27b",
+    # "qwen3.6-max-preview",
 ]
 
 # Backward-compatible defaults for callers/tests that pass a single model.
