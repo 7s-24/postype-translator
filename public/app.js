@@ -186,7 +186,8 @@ function updateExtractButtonLabel() {
   $("btn-translate").textContent = isTermsReviewOpen() ? "重新提取术语" : "提取术语并翻译";
 }
 
-function setBusy(busy) {
+function setBusy(busy, options = {}) {
+  const { notifyComplete = true } = options;
   $("btn-translate").disabled = busy;
   $("btn-direct-translate").disabled = busy;
   $("btn-download").disabled = busy;
@@ -197,8 +198,10 @@ function setBusy(busy) {
 
   if (busy) {
     $("btn-translate").textContent = "处理中…";
+    scheduleWaitingSnake();
   } else {
     updateExtractButtonLabel();
+    stopWaitingSnake({ notifyComplete });
   }
 }
 
@@ -811,7 +814,7 @@ async function prepareAndExtract(options = {}) {
   } catch (err) {
     showError(err);
     $("progress-label").textContent = "失败";
-    setBusy(false);
+    setBusy(false, { notifyComplete: false });
     await endProcessingWakeLock();
   }
 }
@@ -832,6 +835,7 @@ async function translateWithGlossary(glossary) {
   const clean = glossary
     .filter(g => g.ko && g.zh)
     .map(g => ({ ko:g.ko, zh:g.zh, category:g.category }));
+  let completed = false;
 
   try {
     setProgress("准备翻译", 0, total);
@@ -956,13 +960,376 @@ async function translateWithGlossary(glossary) {
           : "已完成译文问题复核，请检查术语和人称是否符合原文。"
       );
     }
+    completed = true;
   } catch (err) {
     showError(err);
     $("progress-label").textContent = "失败";
   } finally {
-    setBusy(false);
+    setBusy(false, { notifyComplete: completed });
     await endProcessingWakeLock();
   }
+}
+
+
+// ══════════════════════════════════════════════════════════
+//  WAITING SNAKE GAME
+// ══════════════════════════════════════════════════════════
+const SNAKE_LEADERBOARD_KEY = "postype_snake_leaderboard";
+const SNAKE_PLAYER_NAME_KEY = "postype_snake_player_name";
+const SNAKE_AUTO_OPEN_DELAY = 4500;
+const SNAKE_GRID_SIZE = 18;
+const SNAKE_CELL_SIZE = 20;
+const SNAKE_TICK_MS = 135;
+const PERSON_CATEGORIES = new Set(["人名", "艺名", "本名", "称呼"]);
+
+let snakeAutoTimer = null;
+let snakeInterval = null;
+let snakeActive = false;
+let snakeDismissedForBusy = false;
+let snakeRetryLeft = 1;
+let snakeScore = 0;
+let snakeDirection = { x: 1, y: 0 };
+let snakeNextDirection = { x: 1, y: 0 };
+let snakeBody = [];
+let snakeFood = null;
+let snakeFoodTerms = [];
+let snakeGameOver = false;
+let snakeScoreRecorded = false;
+
+function getSnakeCanvasContext() {
+  return $("snake-board")?.getContext("2d");
+}
+
+function getSnakeFoodTerms() {
+  const chars = cleanGlossaryForExport(getGlossary())
+    .filter(t => PERSON_CATEGORIES.has(t.category))
+    .flatMap(t => Array.from(t.zh || t.ko || ""))
+    .map(ch => ch.trim())
+    .filter(ch => ch && /[\u3131-\u318E\uAC00-\uD7A3\u4E00-\u9FFFA-Za-z0-9]/.test(ch));
+  return Array.from(new Set(chars)).slice(0, 120);
+}
+
+function getSnakePlayerName() {
+  return (localStorage.getItem(SNAKE_PLAYER_NAME_KEY) || "").trim();
+}
+
+function setSnakePlayerName(name) {
+  const cleanName = String(name || "").trim().slice(0, 16);
+  if (cleanName) localStorage.setItem(SNAKE_PLAYER_NAME_KEY, cleanName);
+  return cleanName;
+}
+
+function readSnakeLeaderboard() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SNAKE_LEADERBOARD_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter(r => Number.isFinite(r.score)).slice(0, 5) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSnakeLeaderboard(rows) {
+  localStorage.setItem(SNAKE_LEADERBOARD_KEY, JSON.stringify(rows.slice(0, 5)));
+}
+
+async function submitSnakeScoreToMongoDB(_entry) {
+  // MongoDB backend is not implemented yet. Keep this hook empty for the future API call.
+  return { ok: false, skipped: true };
+}
+
+async function addSnakeLeaderboardScore(score, options = {}) {
+  const { name = "匿名", submitGlobal = false } = options;
+  const entry = {
+    name: name || "匿名",
+    score,
+    food: snakeFood?.label || "术语",
+    at: new Date().toLocaleString("zh-CN", { hour12: false }),
+  };
+  const rows = readSnakeLeaderboard();
+  rows.push(entry);
+  rows.sort((a, b) => b.score - a.score || String(b.at).localeCompare(String(a.at)));
+  writeSnakeLeaderboard(rows);
+
+  if (submitGlobal) {
+    await submitSnakeScoreToMongoDB(entry);
+  }
+
+  renderSnakeLeaderboard();
+}
+
+function renderSnakeLeaderboard() {
+  const list = $("snake-leaderboard");
+  if (!list) return;
+
+  const rows = readSnakeLeaderboard();
+  if (!rows.length) {
+    list.innerHTML = '<li class="empty">还没有记录，先来一局。</li>';
+    return;
+  }
+
+  list.innerHTML = rows.map(row => (
+    `<li>${esc(row.name || "匿名")} · ${esc(row.score)} 分 · ${esc(row.food || "术语")} · ${esc(row.at || "刚刚")}</li>`
+  )).join("");
+}
+
+function prepareSnakeScoreForm() {
+  const nameInput = $("snake-player-name");
+  const submitButton = $("snake-submit-score");
+  if (nameInput) nameInput.value = getSnakePlayerName();
+  if (submitButton) {
+    submitButton.disabled = false;
+    submitButton.textContent = "记录成绩";
+  }
+}
+
+async function recordSnakeScore() {
+  if (snakeScoreRecorded || !snakeGameOver) return;
+
+  const name = setSnakePlayerName($("snake-player-name")?.value || "匿名") || "匿名";
+  const submitGlobal = Boolean($("snake-submit-global")?.checked);
+  const submitButton = $("snake-submit-score");
+  if (submitButton) {
+    submitButton.disabled = true;
+    submitButton.textContent = "已记录";
+  }
+
+  await addSnakeLeaderboardScore(snakeScore, { name, submitGlobal });
+  snakeScoreRecorded = true;
+  $("snake-rank-note").textContent = submitGlobal
+    ? "本局已记录；总榜同步接口暂未实装，已先保存在本机。"
+    : "本局已记录在本机排行榜。";
+}
+
+function updateSnakeHud() {
+  $("snake-score").textContent = snakeScore;
+  $("snake-food-name").textContent = snakeFood?.label || "术语";
+  $("snake-retry-left").textContent = snakeRetryLeft;
+}
+
+function sameSnakePoint(a, b) {
+  return a.x === b.x && a.y === b.y;
+}
+
+function randomSnakeCell() {
+  return {
+    x: Math.floor(Math.random() * SNAKE_GRID_SIZE),
+    y: Math.floor(Math.random() * SNAKE_GRID_SIZE),
+  };
+}
+
+function placeSnakeFood() {
+  let pos = randomSnakeCell();
+  while (snakeBody.some(part => sameSnakePoint(part, pos))) {
+    pos = randomSnakeCell();
+  }
+
+  const label = snakeFoodTerms.length
+    ? snakeFoodTerms[Math.floor(Math.random() * snakeFoodTerms.length)]
+    : "术语";
+  snakeFood = { ...pos, label };
+  updateSnakeHud();
+}
+
+function drawSnakeGame() {
+  const ctx = getSnakeCanvasContext();
+  if (!ctx) return;
+
+  ctx.clearRect(0, 0, SNAKE_GRID_SIZE * SNAKE_CELL_SIZE, SNAKE_GRID_SIZE * SNAKE_CELL_SIZE);
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, SNAKE_GRID_SIZE * SNAKE_CELL_SIZE, SNAKE_GRID_SIZE * SNAKE_CELL_SIZE);
+
+  ctx.strokeStyle = "#eee";
+  ctx.lineWidth = 1;
+  for (let i = 1; i < SNAKE_GRID_SIZE; i++) {
+    const p = i * SNAKE_CELL_SIZE + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(p, 0);
+    ctx.lineTo(p, SNAKE_GRID_SIZE * SNAKE_CELL_SIZE);
+    ctx.moveTo(0, p);
+    ctx.lineTo(SNAKE_GRID_SIZE * SNAKE_CELL_SIZE, p);
+    ctx.stroke();
+  }
+
+  if (snakeFood) {
+    ctx.fillStyle = "#fff";
+    ctx.strokeStyle = "#111";
+    ctx.lineWidth = 2;
+    ctx.fillRect(snakeFood.x * SNAKE_CELL_SIZE + 2, snakeFood.y * SNAKE_CELL_SIZE + 2, SNAKE_CELL_SIZE - 4, SNAKE_CELL_SIZE - 4);
+    ctx.strokeRect(snakeFood.x * SNAKE_CELL_SIZE + 2.5, snakeFood.y * SNAKE_CELL_SIZE + 2.5, SNAKE_CELL_SIZE - 5, SNAKE_CELL_SIZE - 5);
+    ctx.fillStyle = "#111";
+    ctx.font = "700 10px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(String(snakeFood.label).slice(0, 2), snakeFood.x * SNAKE_CELL_SIZE + 10, snakeFood.y * SNAKE_CELL_SIZE + 10, 16);
+  }
+
+  snakeBody.forEach((part, index) => {
+    ctx.fillStyle = index === 0 ? "#111" : "#444";
+    ctx.fillRect(part.x * SNAKE_CELL_SIZE + 2, part.y * SNAKE_CELL_SIZE + 2, SNAKE_CELL_SIZE - 4, SNAKE_CELL_SIZE - 4);
+  });
+}
+
+function resetSnakeGame({ resetRetry = false } = {}) {
+  if (resetRetry) snakeRetryLeft = 1;
+  snakeScore = 0;
+  snakeDirection = { x: 1, y: 0 };
+  snakeNextDirection = { x: 1, y: 0 };
+  snakeBody = [
+    { x: 5, y: 9 },
+    { x: 4, y: 9 },
+    { x: 3, y: 9 },
+  ];
+  snakeGameOver = false;
+  snakeScoreRecorded = false;
+  snakeFoodTerms = getSnakeFoodTerms();
+  $("snake-gameover").classList.remove("active");
+  $("snake-retry").disabled = false;
+  prepareSnakeScoreForm();
+  $("snake-rank-note").textContent = "输入名字后记录本局成绩；名字会保存在本机，下次自动填入。";
+  placeSnakeFood();
+  updateSnakeHud();
+  drawSnakeGame();
+}
+
+function endSnakeGame() {
+  snakeGameOver = true;
+  clearInterval(snakeInterval);
+  snakeInterval = null;
+  prepareSnakeScoreForm();
+  renderSnakeLeaderboard();
+  $("snake-gameover").classList.add("active");
+  $("snake-retry").disabled = snakeRetryLeft <= 0;
+  $("snake-rank-note").textContent = snakeRetryLeft > 0
+    ? "输入名字后记录本局成绩；还可以重试一次。"
+    : "输入名字后记录本局成绩；重试机会已用完。";
+  updateSnakeHud();
+}
+
+function tickSnakeGame() {
+  if (snakeGameOver) return;
+
+  snakeDirection = snakeNextDirection;
+  const head = snakeBody[0];
+  const next = { x: head.x + snakeDirection.x, y: head.y + snakeDirection.y };
+  const hitsWall = next.x < 0 || next.y < 0 || next.x >= SNAKE_GRID_SIZE || next.y >= SNAKE_GRID_SIZE;
+  const hitsSelf = snakeBody.some(part => sameSnakePoint(part, next));
+
+  if (hitsWall || hitsSelf) {
+    endSnakeGame();
+    drawSnakeGame();
+    return;
+  }
+
+  snakeBody.unshift(next);
+  if (snakeFood && sameSnakePoint(next, snakeFood)) {
+    snakeScore += 10;
+    placeSnakeFood();
+  } else {
+    snakeBody.pop();
+  }
+
+  updateSnakeHud();
+  drawSnakeGame();
+}
+
+function startSnakeLoop() {
+  clearInterval(snakeInterval);
+  snakeInterval = setInterval(tickSnakeGame, SNAKE_TICK_MS);
+}
+
+function openSnakeGame() {
+  const modal = $("snake-modal");
+  if (!modal || snakeActive) return;
+
+  snakeActive = true;
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+  resetSnakeGame({ resetRetry: true });
+  startSnakeLoop();
+}
+
+function closeSnakeGame({ dismissed = true } = {}) {
+  const modal = $("snake-modal");
+  if (!modal) return;
+
+  if (dismissed) snakeDismissedForBusy = true;
+  snakeActive = false;
+  modal.classList.remove("active");
+  modal.setAttribute("aria-hidden", "true");
+  clearInterval(snakeInterval);
+  snakeInterval = null;
+}
+
+function scheduleWaitingSnake() {
+  clearTimeout(snakeAutoTimer);
+  snakeDismissedForBusy = false;
+  snakeAutoTimer = setTimeout(() => {
+    if (!snakeDismissedForBusy) openSnakeGame();
+  }, SNAKE_AUTO_OPEN_DELAY);
+}
+
+function stopWaitingSnake(options = {}) {
+  const { notifyComplete = true } = options;
+  clearTimeout(snakeAutoTimer);
+  snakeAutoTimer = null;
+  snakeDismissedForBusy = false;
+  if (!snakeActive || !notifyComplete) return;
+  showNotice("处理已完成。小游戏不会被打断，结束后可继续查看结果。");
+}
+
+function setSnakeDirection(next) {
+  if (!next || !snakeActive || snakeGameOver) return;
+  if (next.x + snakeDirection.x === 0 && next.y + snakeDirection.y === 0) return;
+  snakeNextDirection = next;
+}
+
+function bindSnakeEvents() {
+  $("snake-close").addEventListener("click", () => closeSnakeGame());
+  $("snake-hide").addEventListener("click", () => closeSnakeGame());
+  $("snake-submit-score").addEventListener("click", () => {
+    recordSnakeScore();
+  });
+
+  $("snake-player-name").addEventListener("change", e => {
+    setSnakePlayerName(e.target.value);
+  });
+
+  document.querySelectorAll(".snake-dir").forEach(button => {
+    button.addEventListener("click", () => {
+      const dirMap = {
+        up: { x: 0, y: -1 },
+        down: { x: 0, y: 1 },
+        left: { x: -1, y: 0 },
+        right: { x: 1, y: 0 },
+      };
+      setSnakeDirection(dirMap[button.dataset.dir]);
+    });
+  });
+
+  $("snake-retry").addEventListener("click", async () => {
+    if (snakeRetryLeft <= 0) return;
+    await recordSnakeScore();
+    snakeRetryLeft -= 1;
+    resetSnakeGame();
+    startSnakeLoop();
+  });
+
+  document.addEventListener("keydown", e => {
+    const keyMap = {
+      ArrowUp: { x: 0, y: -1 },
+      KeyW: { x: 0, y: -1 },
+      ArrowDown: { x: 0, y: 1 },
+      KeyS: { x: 0, y: 1 },
+      ArrowLeft: { x: -1, y: 0 },
+      KeyA: { x: -1, y: 0 },
+      ArrowRight: { x: 1, y: 0 },
+      KeyD: { x: 1, y: 0 },
+    };
+    const next = keyMap[e.code];
+    if (!next || !snakeActive) return;
+    e.preventDefault();
+    setSnakeDirection(next);
+  });
 }
 
 // ── Events ───────────────────────────────────────────────
@@ -1067,5 +1434,6 @@ $("help-modal").addEventListener("click", e => {
 });
 
 // ── Init ─────────────────────────────────────────────────
+bindSnakeEvents();
 updateGlossaryModeLabel();
 loadGlossaryPresets();
