@@ -330,31 +330,29 @@ def sample_text(text: str, max_chars: int = 10000) -> str:
 
 def extract_terms(client, text: str, model: str = MODEL_QUALITY) -> list:
     sampled = sample_text(text)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=build_chat_messages(EXTRACT_TERMS_PROMPT, sampled, model),
+        temperature=0.1,
+    )
+    raw = resp.choices[0].message.content.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=build_chat_messages(EXTRACT_TERMS_PROMPT, sampled, model),
-            temperature=0.1,
-        )
-        raw = resp.choices[0].message.content.strip()
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
         terms = json.loads(raw)
-        if not isinstance(terms, list):
-            return []
-        valid = []
-        for t in terms:
-            if isinstance(t, dict) and "ko" in t and "zh" in t:
-                valid.append({
-                    "ko": str(t["ko"]),
-                    "zh": str(t["zh"]),
-                    "category": str(t.get("category", "其他")),
-                })
-        return valid
-    except Exception as exc:
-        if is_quota_error(exc):
-            raise
+    except Exception:
         return []
+    if not isinstance(terms, list):
+        return []
+    valid = []
+    for t in terms:
+        if isinstance(t, dict) and "ko" in t and "zh" in t:
+            valid.append({
+                "ko": str(t["ko"]),
+                "zh": str(t["zh"]),
+                "category": str(t.get("category", "其他")),
+            })
+    return valid
 
 
 def filter_glossary_for_chunk(glossary: list, chunk: str) -> list:
@@ -559,7 +557,7 @@ def translate_chunk(
         )
         return response.choices[0].message.content.strip()
     except Exception as exc:
-        if is_quota_error(exc) or is_sensitive_content_error(exc) or not allow_google_fallback:
+        if is_quota_error(exc) or is_sensitive_content_error(exc):
             raise
         if retry_count == 0:
             sub_chunks = split_chunk_further(chunk)
@@ -576,7 +574,7 @@ def translate_chunk(
                             )
                         )
                     except Exception as exc:
-                        if is_quota_error(exc) or is_sensitive_content_error(exc):
+                        if is_quota_error(exc) or is_sensitive_content_error(exc) or not allow_google_fallback:
                             raise
                         fallback = translate_by_google_with_glossary(sc, glossary or [])
                         results.append(TranslationText(fallback, used_google=True))
@@ -584,6 +582,8 @@ def translate_chunk(
                     "\n".join(results),
                     used_google=any(getattr(result, "used_google", False) for result in results),
                 )
+        if not allow_google_fallback:
+            raise
         fallback = translate_by_google_with_glossary(chunk, glossary or [])
         if fallback and fallback != chunk:
             return TranslationText(fallback, used_google=True)
@@ -603,16 +603,13 @@ def randomized_sensitive_fallback_models():
     return random.sample(SENSITIVE_FALLBACK_MODELS, k=len(SENSITIVE_FALLBACK_MODELS))
 
 
-def run_sensitive_fallback_models(client, chunk, index, total, previous, glossary):
+def run_sensitive_model_rotation(callback):
     last_exc = None
     model_order = randomized_sensitive_fallback_models()
     for model in model_order:
         try:
-            translated = translate_chunk(
-                client, chunk, index, total, previous,
-                glossary=glossary, model=model, allow_google_fallback=False,
-            )
-            return translated, {
+            result = callback(model)
+            return result, {
                 "sensitiveFallback": True,
                 "fallback": True,
                 "fallbackType": "sensitive_model",
@@ -620,14 +617,21 @@ def run_sensitive_fallback_models(client, chunk, index, total, previous, glossar
                 "model": model,
             }
         except Exception as exc:
-            if is_quota_error(exc) or is_sensitive_content_error(exc):
-                last_exc = exc
-                continue
-            raise
+            last_exc = exc
+            continue
 
     if last_exc:
         raise last_exc
     raise RuntimeError("敏感内容兼容模型池没有可用模型")
+
+
+def run_sensitive_fallback_models(client, chunk, index, total, previous, glossary):
+    return run_sensitive_model_rotation(
+        lambda model: translate_chunk(
+            client, chunk, index, total, previous,
+            glossary=glossary, model=model, allow_google_fallback=False,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1035,12 +1039,24 @@ class handler(BaseHTTPRequestHandler):
                     status, payload = error_response("MISSING_API_KEY", 500)
                     return self._send_json(status, payload)
                 # Term extraction is a quality-sensitive one-shot step, so use
-                # the standard model pool with quota-aware rotation.
-                terms, meta = self._run_with_model_rotation(
-                    "standard",
-                    lambda model: extract_terms(client, text, model=model),
-                    model_session_id=model_session_id,
-                )
+                # the standard model pool with quota-aware rotation. If provider
+                # errors still prevent extraction, try the compatible fallback
+                # pool before degrading to an empty term list.
+                try:
+                    terms, meta = self._run_with_model_rotation(
+                        "standard",
+                        lambda model: extract_terms(client, text, model=model),
+                        model_session_id=model_session_id,
+                    )
+                except Exception:
+                    try:
+                        terms, meta = run_sensitive_model_rotation(
+                            lambda model: extract_terms(client, text, model=model)
+                        )
+                    except Exception:
+                        terms, meta = [], {
+                            "modelOrder": self._ordered_models("standard", model_session_id=model_session_id),
+                        }
                 return self._send_json(200, {"ok": True, "terms": terms, **meta})
 
             # === MONGODB OPTIONAL WRITES ===
@@ -1072,6 +1088,7 @@ class handler(BaseHTTPRequestHandler):
                         lambda model: translate_chunk(
                             client, chunk, index, total, previous,
                             glossary=glossary, model=model,
+                            allow_google_fallback=False,
                         ),
                         model_session_id=model_session_id,
                     )
@@ -1084,20 +1101,19 @@ class handler(BaseHTTPRequestHandler):
                         "note": "此 chunk 使用了机械翻译" if used_google else "",
                         **meta,
                     })
-                except Exception as exc:
-                    if is_sensitive_content_error(exc):
-                        try:
-                            translated, meta = run_sensitive_fallback_models(
-                                client, chunk, index, total, previous, glossary or [],
-                            )
-                            return self._send_json(200, {
-                                "ok": True,
-                                "translated": str(translated),
-                                "note": "此 chunk 已切换敏感内容兼容模型完成翻译",
-                                **meta,
-                            })
-                        except Exception:
-                            pass
+                except Exception:
+                    try:
+                        translated, meta = run_sensitive_fallback_models(
+                            client, chunk, index, total, previous, glossary or [],
+                        )
+                        return self._send_json(200, {
+                            "ok": True,
+                            "translated": str(translated),
+                            "note": "此 chunk 已切换兼容模型完成翻译",
+                            **meta,
+                        })
+                    except Exception:
+                        pass
 
                     translated = translate_by_google_split_with_glossary(chunk, glossary or [])
                     return self._send_json(200, {
