@@ -155,33 +155,47 @@
 
 <div id="help-modal" class="help-modal">
   <div class="help-box">
-    <h2 class="help-title">使用方法</h2>
+    <h2 class="help-title">帮助</h2>
 
-    <div class="help-section">
-      <p>把 Postype 韩文小说正文翻译成简体中文的工具。</p>
-      <p>是朕执意要看的，要罚就罚朕吧！</p>
+    <div class="help-tabs" role="tablist" aria-label="帮助内容">
+      <button class="help-tab active" type="button" data-help-tab="usage" role="tab" aria-selected="true">使用说明</button>
+      <button class="help-tab" type="button" data-help-tab="changelog" role="tab" aria-selected="false">更新日志</button>
     </div>
 
-    <div class="help-section">
-      <div class="help-section-title">输入方式</div>
-      <ol class="help-list">
-        <li>输入 Postype 页面 URL</li>
-        <li>手动复制粘贴韩文正文</li>
-        <li>上传 .html 或 .webarchive 文件</li>
-      </ol>
+    <div id="help-usage-panel" class="help-tab-panel active" role="tabpanel">
+      <div class="help-section">
+        <p>把 Postype 韩文小说正文翻译成简体中文的工具。</p>
+        <p>是朕执意要看的，要罚就罚朕吧！</p>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-title">输入方式</div>
+        <ol class="help-list">
+          <li>输入 Postype 页面 URL</li>
+          <li>手动复制粘贴韩文正文</li>
+          <li>上传 .html 或 .webarchive 文件</li>
+        </ol>
+      </div>
+
+      <div class="help-section help-note">
+        付费和受限内容不支持 URL 输入，需要手动复制粘贴文本，或者上传文件。
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-title">注意事项</div>
+        <ul class="help-list">
+          <li>URL和上传的部分只适配Postype。</li>
+          <li>.webarchive 文件会解析主资源中的 HTML 内容。但因为文件一般太大，所以基本是摆设状态。</li>
+          <li>翻译质量和速度会受到不同因素的影响。如果翻译不理想，建议朴素地重试一次。</li>
+        </ul>
+      </div>
     </div>
 
-    <div class="help-section help-note">
-      付费和受限内容不支持 URL 输入，需要手动复制粘贴文本，或者上传文件。
-    </div>
-
-    <div class="help-section">
-      <div class="help-section-title">注意事项</div>
-      <ul class="help-list">
-        <li>URL和上传的部分只适配Postype。</li>
-        <li>.webarchive 文件会解析主资源中的 HTML 内容。但因为文件一般太大，所以基本是摆设状态。</li>
-        <li>翻译质量和速度会受到不同因素的影响。如果翻译不理想，建议朴素地重试一次。</li>
-      </ul>
+    <div id="help-changelog-panel" class="help-tab-panel" role="tabpanel">
+      <div class="help-section">
+        <div class="help-section-title">2026-05-15</div>
+        <p>更新了提交术语库的功能。现在开始可以贡献自己创建的用户术语库了。</p>
+      </div>
     </div>
 
     <div class="help-meta">
