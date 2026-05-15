@@ -92,7 +92,7 @@ SENSITIVE_FALLBACK_MODELS = [
 # Backward-compatible defaults for callers/tests that pass a single model.
 MODEL_QUALITY = STANDARD_MODELS[0]
 MODEL_FAST    = LIGHT_MODELS[0]
-MAX_CHARS     = 1500
+MAX_CHARS     = 3000          # bigger chunks → fewer API calls
 MODEL_STATE_FILE = os.getenv("MODEL_STATE_FILE", "/tmp/postype_translator_model_state.json")
 
 ERROR_ACTION = "如果方便的话，可以复制以下的错误码，并描述错误产生的情况，提交给 fedrick1plela755@gmail.com 来帮助改进："
@@ -405,16 +405,24 @@ KOREAN_PARTICLE_SUFFIXES = (
     "도", "만", "로", "야", "아", "여",
 )
 
-TERM_CANDIDATE_LIMIT = 20
+TERM_CANDIDATE_LIMIT = 40
+TERM_CONTEXT_SAMPLE_CHARS = 2500
 
 
 def sample_text(text: str, max_chars: int = 10000) -> str:
+    """按 max_chars 自适应切首/中/尾。
+
+    首 50% / 中 25% / 尾 25%，对任何 max_chars 都成立；
+    原文不超过 max_chars 时原样返回。
+    """
     if len(text) <= max_chars:
         return text
-    first = text[:5000]
-    mid_start = len(text) // 2 - 1250
-    middle = text[mid_start : mid_start + 2500]
-    last = text[-2500:]
+    first_len = max_chars // 2
+    side_len = max_chars // 4
+    first = text[:first_len]
+    mid_start = max(0, len(text) // 2 - side_len // 2)
+    middle = text[mid_start : mid_start + side_len]
+    last = text[-side_len:]
     return first + "\n…\n" + middle + "\n…\n" + last
 
 
@@ -485,7 +493,7 @@ def build_term_translation_prompt(text: str, candidates: list) -> str:
         else:
             suffix = f"（出现 {count} 次）"
         candidate_lines.append(f"- {token}{suffix}")
-    sampled = sample_text(text, max_chars=3000)
+    sampled = sample_text(text, max_chars=TERM_CONTEXT_SAMPLE_CHARS)
     return (
         "【候选高频词】\n"
         + "\n".join(candidate_lines)
@@ -696,6 +704,7 @@ def translate_chunk(
     model=MODEL_QUALITY,
     retry_count=0,
     allow_google_fallback=True,
+    enable_internal_retry=True,
 ):
     context = ""
     if previous_translation:
@@ -727,6 +736,10 @@ def translate_chunk(
         return response.choices[0].message.content.strip()
     except Exception as exc:
         if is_quota_error(exc) or is_sensitive_content_error(exc):
+            raise
+        # 被外层模型轮换调用时，禁用内部切小重试；失败立刻 raise，让外层换模型，
+        # 避免一个 400 模型消耗多次 API 请求。
+        if not enable_internal_retry:
             raise
         if retry_count == 0:
             sub_chunks = split_chunk_further(chunk)
@@ -772,9 +785,19 @@ def randomized_sensitive_fallback_models():
     return random.sample(SENSITIVE_FALLBACK_MODELS, k=len(SENSITIVE_FALLBACK_MODELS))
 
 
-def run_sensitive_model_rotation(callback):
+SENSITIVE_FALLBACK_MAX_ATTEMPTS = 4
+
+
+def run_sensitive_model_rotation(callback, max_attempts=SENSITIVE_FALLBACK_MAX_ATTEMPTS):
+    """Try a few randomly-ordered sensitive-friendly models, then give up.
+
+    - Caps total attempts at ``max_attempts`` so we don't burn through the
+      entire pool (15 models × per-model request cost) on hopeless inputs.
+    - Exits early on quota errors: those won't be cured by trying more models.
+    """
     last_exc = None
-    model_order = randomized_sensitive_fallback_models()
+    full_order = randomized_sensitive_fallback_models()
+    model_order = full_order[:max_attempts]
     for model in model_order:
         try:
             result = callback(model)
@@ -787,6 +810,8 @@ def run_sensitive_model_rotation(callback):
             }
         except Exception as exc:
             last_exc = exc
+            if is_quota_error(exc):
+                break
             continue
 
     if last_exc:
@@ -798,7 +823,9 @@ def run_sensitive_fallback_models(client, chunk, index, total, previous, glossar
     return run_sensitive_model_rotation(
         lambda model: translate_chunk(
             client, chunk, index, total, previous,
-            glossary=glossary, model=model, allow_google_fallback=False,
+            glossary=glossary, model=model,
+            allow_google_fallback=False,
+            enable_internal_retry=False,
         )
     )
 
@@ -1258,6 +1285,7 @@ class handler(BaseHTTPRequestHandler):
                             client, chunk, index, total, previous,
                             glossary=glossary, model=model,
                             allow_google_fallback=False,
+                            enable_internal_retry=False,
                         ),
                         model_session_id=model_session_id,
                     )
