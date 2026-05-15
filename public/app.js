@@ -38,7 +38,7 @@ function scheduleToastAutoHide() {
     clearNotice();
   }, 5200);
 }
-const API_ERROR_ACTION = "Please copy the error code and describe what happened to fedrick1plela755@gmail.com";
+const API_ERROR_ACTION = "如果方便的话，可以复制错误码，并描述错误产生的情况，提交给 fedrick1plela755@gmail.com 来帮助改进";
 
 function getApiError(err) {
   if (err && typeof err === "object") {
@@ -183,7 +183,7 @@ function isTermsReviewOpen() {
 }
 
 function updateExtractButtonLabel() {
-  $("btn-translate").textContent = isTermsReviewOpen() ? "重新提取术语" : "提取术语并翻译";
+  $("btn-translate").textContent = isTermsReviewOpen() ? "重新提取术语" : "提取术语后翻译";
 }
 
 function setBusy(busy) {
@@ -1065,6 +1065,81 @@ $("help-modal").addEventListener("click", e => {
     $("help-modal").classList.remove("active");
   }
 });
+
+// ══════════════════════════════════════════════════════════
+//  SITE LIKE
+// ══════════════════════════════════════════════════════════
+const SITE_LIKE_KEY = "postype_site_liked";
+
+async function loadSiteLikeCount() {
+  // 用一个固定的 pageUrl 代表整个网站
+  try {
+    const data = await postJSON({
+      action: "record_like",
+      payload: {
+        pageUrl: window.location.origin || "https://postype-translator.local",
+        pageTitle: "韩文同人翻译器",
+        source: "load",
+        delta: 0,   // 0 不计入，但代码里会被强制改成 1
+      },
+    });
+    // 注意：因为 delta=0 被强制改成 1，这里其实会 +1
+    // 我们改用另一种方式：只在用户首次点击时才发请求
+    console.debug("site like loaded", data);
+  } catch (err) {
+    console.warn("site like load failed", err);
+  }
+}
+
+async function recordSiteLike() {
+  const liked = localStorage.getItem(SITE_LIKE_KEY) === "1";
+  if (liked) {
+    showNotice("已经点过赞啦，谢谢！");
+    return;
+  }
+
+  const btn = $("site-like");
+  btn.disabled = true;
+
+  try {
+    const data = await postJSON({
+      action: "record_like",
+      payload: {
+        pageUrl: window.location.origin || "https://postype-translator.local",
+        pageTitle: "韩文同人翻译器",
+        source: "site_button",
+      },
+    });
+    const count = data?.data?.likeCount;
+    if (typeof count === "number") {
+      $("like-count").textContent = count;
+    }
+    $("like-icon")?.classList?.add("liked");
+    btn.querySelector(".like-icon").textContent = "♥";
+    localStorage.setItem(SITE_LIKE_KEY, "1");
+    showNotice("谢谢喜欢！");
+  } catch (err) {
+    const apiError = getApiError(err);
+    if (apiError?.code === "DATABASE_NOT_CONFIGURED") {
+      showError("暂时没能录入……呜呜……");
+    } else {
+      showError(err);
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("site-like")?.addEventListener("click", recordSiteLike);
+
+// 页面加载时反映 localStorage 状态
+if (localStorage.getItem(SITE_LIKE_KEY) === "1") {
+  const btn = $("site-like");
+  if (btn) {
+    btn.querySelector(".like-icon").textContent = "♥";
+    btn.querySelector(".like-icon").classList.add("liked");
+  }
+}
 
 // ── Init ─────────────────────────────────────────────────
 updateGlossaryModeLabel();

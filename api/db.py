@@ -64,12 +64,25 @@ def _normalize_url(url):
     return url[:2048]
 
 
+def _serialize_value(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [_serialize_value(item) for item in value]
+    if isinstance(value, dict):
+        return _serialize_document(value)
+    return value
+
+
 def _serialize_document(document):
     if not document:
         return document
-    serialized = dict(document)
-    if "_id" in serialized:
-        serialized["id"] = str(serialized.pop("_id"))
+    serialized = {}
+    for key, value in dict(document).items():
+        if key == "_id":
+            serialized["id"] = str(value)
+        else:
+            serialized[key] = _serialize_value(value)
     return serialized
 
 
