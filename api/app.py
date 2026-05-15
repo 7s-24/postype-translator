@@ -12,14 +12,8 @@ import io
 import random
 import urllib.parse
 
-from api.db import (
-    DatabaseNotConfigured,
-    ValidationError,
-    save_event,
-    save_glossary_entries,
-    save_glossary_upload,
-    save_site_like,
-)
+from api.db import DatabaseNotConfigured, ValidationError
+from api.db_actions import build_db_write
 
 # ---------------------------------------------------------------------------
 # Models & config
@@ -875,10 +869,6 @@ class handler(BaseHTTPRequestHandler):
     def _pick_model(self, data):
         return self._current_model_status(self._tier_name(data))["model"]
 
-    def _db_payload(self, data):
-        payload = data.get("payload")
-        return payload if isinstance(payload, dict) else data
-
     def _send_db_result(self, callback):
         try:
             result = callback()
@@ -956,23 +946,9 @@ class handler(BaseHTTPRequestHandler):
                 return self._send_json(200, {"ok": True, "terms": terms, **meta})
 
             # === MONGODB OPTIONAL WRITES ===
-            if action == "record_like":
-                payload = self._db_payload(data)
-                return self._send_db_result(lambda: save_site_like(payload))
-
-            if action == "save_glossary_upload":
-                payload = self._db_payload(data)
-                return self._send_db_result(lambda: save_glossary_upload(payload))
-
-            if action == "save_glossary_entries":
-                payload = self._db_payload(data)
-                entries = payload.get("entries", [])
-                context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else payload
-                return self._send_db_result(lambda: save_glossary_entries(entries, context))
-
-            if action == "track_event":
-                payload = self._db_payload(data)
-                return self._send_db_result(lambda: save_event(payload))
+            db_write = build_db_write(action, data)
+            if db_write:
+                return self._send_db_result(db_write)
 
             # === TRANSLATE ===
             if action == "translate":

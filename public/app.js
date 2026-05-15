@@ -1000,6 +1000,13 @@ async function translateWithGlossary(glossary) {
   const clean = glossary
     .filter(g => g.ko && g.zh)
     .map(g => ({ ko:g.ko, zh:g.zh, category:g.category }));
+  const startedAt = Date.now();
+  const usageStats = buildGlossaryUsageStats(glossary, clean, {
+    tier: fast ? "light" : "standard",
+    chunkCount: total,
+  });
+
+  void trackGlossaryUsageEvent("glossary_translate_started", usageStats);
 
   try {
     setProgress("准备翻译", 0, total);
@@ -1124,7 +1131,18 @@ async function translateWithGlossary(glossary) {
           : "已完成译文问题复核，请检查术语和人称是否符合原文。"
       );
     }
+
+    void trackGlossaryUsageEvent("glossary_translate_completed", {
+      ...usageStats,
+      durationMs: Date.now() - startedAt,
+      ok: true,
+    });
   } catch (err) {
+    void trackGlossaryUsageEvent("glossary_translate_failed", {
+      ...usageStats,
+      durationMs: Date.now() - startedAt,
+      ok: false,
+    });
     showError(err);
     $("progress-label").textContent = "失败";
   } finally {
