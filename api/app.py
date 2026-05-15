@@ -174,7 +174,8 @@ EXTRACT_TERMS_PROMPT = """你是专业韩文小说高频实词术语翻译器。
 3. 必须过滤掉没有术语价值的连接词、助词残片、语尾残片、代词、泛用副词、泛用动词/形容词、数字量词、普通寒暄和过于日常的词。
 4. 如果某个候选词看起来像被韩文助词或语尾粘连了，请在 ko 字段中使用更干净的原形/词干，并给出自然的简体中文译法。
 5. 不确定是否有意义时，宁可过滤掉。
-6. 标注为【引号内出现】的词条，是原文用「」『』《》【】[] 等成对引号特意框住的内容，大概率是专有名词/技能/作品/物品/组织，请优先保留并翻译；只有在明显是普通台词强调或语气词时才过滤。
+6. 必须过滤“脑袋/眼睛/手/脸/嘴”等普通身体部位、普通家具、普通动作对象等直译即可的日常名词；只有它们作为角色昵称、专有称号、虚构概念或引号内专名出现时才保留。
+7. 标注为【引号内出现】的词条，是原文用「」『』《》【】[] 等成对引号特意框住的内容，大概率是专有名词/技能/作品/物品/组织，请优先保留并翻译；只有在明显是普通台词强调或语气词时才过滤。
 
 输出要求：
 - 只输出 JSON 数组，不要任何其他文字、markdown 标记或代码块符号
@@ -405,8 +406,17 @@ KOREAN_PARTICLE_SUFFIXES = (
     "도", "만", "로", "야", "아", "여",
 )
 
-TERM_CANDIDATE_LIMIT = 40
-TERM_CONTEXT_SAMPLE_CHARS = 2500
+TERM_CANDIDATE_LIMIT = 24
+TERM_CONTEXT_SAMPLE_CHARS = 1200
+
+# 这些词通常可以被模型直接翻译，不需要进入术语审核；
+# 引号内出现的同形词仍会保留给模型判断，避免误删专名/称号。
+KOREAN_EASY_TRANSLATABLE_TERMS = {
+    "머리", "머릿속", "머리카락", "눈", "눈동자", "눈길", "시선", "얼굴", "표정",
+    "코", "입", "입술", "귀", "목", "목소리", "어깨", "팔", "손", "손가락",
+    "가슴", "허리", "다리", "발", "발목", "몸", "등", "피부", "침대", "문",
+    "창문", "방", "집", "책상", "의자", "소파", "옷", "신발",
+}
 
 
 def sample_text(text: str, max_chars: int = 10000) -> str:
@@ -455,7 +465,7 @@ def extract_frequent_content_words(text: str, limit: int = TERM_CANDIDATE_LIMIT)
     order = 0
     for match in KOREAN_CONTENT_TOKEN_RE.finditer(text or ""):
         token = normalize_korean_content_token(match.group(0))
-        if not token:
+        if not token or token in KOREAN_EASY_TRANSLATABLE_TERMS:
             continue
         counts[token] = counts.get(token, 0) + 1
         if token not in first_seen:
@@ -522,11 +532,18 @@ def extract_terms(client, text: str, model: str = MODEL_QUALITY) -> list:
     if not isinstance(terms, list):
         return []
     valid = []
+    quoted_tokens = {token for token, _ in extract_quoted_terms(text or "")}
     for t in terms:
         if isinstance(t, dict) and "ko" in t and "zh" in t:
+            ko = str(t["ko"]).strip()
+            zh = str(t["zh"]).strip()
+            if not ko or not zh:
+                continue
+            if ko in KOREAN_EASY_TRANSLATABLE_TERMS and ko not in quoted_tokens:
+                continue
             valid.append({
-                "ko": str(t["ko"]),
-                "zh": str(t["zh"]),
+                "ko": ko,
+                "zh": zh,
                 "category": str(t.get("category", "其他")),
             })
     return valid
@@ -934,15 +951,25 @@ def fix_fallback_names_and_subjects_chunk(
     return response.choices[0].message.content.strip()
 
 
+def format_google_fallback_with_source(translated_text: str, source_text: str) -> str:
+    translated_text = (translated_text or "").rstrip()
+    source_text = (source_text or "").strip()
+    if not source_text or "【Google 备选翻译原文】" in translated_text:
+        return translated_text
+    return f"{translated_text}\n\n【Google 备选翻译原文】\n{source_text}"
+
+
 def fix_translated_chunks(
     client,
     source_chunks,
     translated_chunks,
     fallback_indices=None,
+    google_fallback_indices=None,
     glossary=None,
     model=MODEL_QUALITY,
 ):
     fallback_set = set(fallback_indices or [])
+    google_fallback_set = set(google_fallback_indices or [])
     fixed = list(translated_chunks)
     total = len(fixed)
 
@@ -985,6 +1012,9 @@ def fix_translated_chunks(
                 )
             except Exception:
                 fixed[idx] = translated
+
+        if chunk_no in google_fallback_set:
+            fixed[idx] = format_google_fallback_with_source(fixed[idx], source)
 
     return "\n\n".join(fixed)
 
@@ -1234,13 +1264,11 @@ class handler(BaseHTTPRequestHandler):
                 if not client:
                     status, payload = error_response("MISSING_API_KEY", 500)
                     return self._send_json(status, payload)
-                # Term extraction is a quality-sensitive one-shot step, so use
-                # the standard model pool with quota-aware rotation. If provider
-                # errors still prevent extraction, try the compatible fallback
-                # pool before degrading to an empty term list.
+                # 术语提取先用轻量模型池：候选词已经在本地按频率和停用词收窄，
+                # 让模型只做快速审核/翻译，避免在正式翻译前等待过久。
                 try:
                     terms, meta = self._run_with_model_rotation(
-                        "standard",
+                        "light",
                         lambda model: extract_terms(client, text, model=model),
                         model_session_id=model_session_id,
                     )
@@ -1251,7 +1279,7 @@ class handler(BaseHTTPRequestHandler):
                         )
                     except Exception:
                         terms, meta = [], {
-                            "modelOrder": self._ordered_models("standard", model_session_id=model_session_id),
+                            "modelOrder": self._ordered_models("light", model_session_id=model_session_id),
                         }
                 return self._send_json(200, {"ok": True, "terms": terms, **meta})
 
@@ -1335,9 +1363,12 @@ class handler(BaseHTTPRequestHandler):
                 source_chunks = data.get("source_chunks", [])
                 translated_chunks = data.get("translated_chunks", [])
                 fallback_indices = data.get("fallback_indices", [])
+                google_fallback_indices = data.get("google_fallback_indices", [])
                 glossary = data.get("glossary", [])
                 if not isinstance(fallback_indices, list):
                     fallback_indices = []
+                if not isinstance(google_fallback_indices, list):
+                    google_fallback_indices = []
 
                 if isinstance(source_chunks, list) and isinstance(translated_chunks, list) and translated_chunks:
                     fixed, meta = self._run_with_model_rotation(
@@ -1347,6 +1378,7 @@ class handler(BaseHTTPRequestHandler):
                             [str(chunk) for chunk in source_chunks],
                             [str(chunk) for chunk in translated_chunks],
                             fallback_indices=[int(i) for i in fallback_indices if str(i).isdigit()],
+                            google_fallback_indices=[int(i) for i in google_fallback_indices if str(i).isdigit()],
                             glossary=glossary,
                             model=model,
                         ),
