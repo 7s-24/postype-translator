@@ -407,7 +407,7 @@ KOREAN_PARTICLE_SUFFIXES = (
 )
 
 TERM_CANDIDATE_LIMIT = 24
-TERM_CONTEXT_SAMPLE_CHARS = 1200
+TERM_CONTEXT_SAMPLE_CHARS = 2000
 
 # 这些词通常可以被模型直接翻译，不需要进入术语审核；
 # 引号内出现的同形词仍会保留给模型判断，避免误删专名/称号。
