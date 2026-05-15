@@ -186,12 +186,30 @@ FIX_SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责对已经
 - 必须修正文本中的韩文残留，把残留韩文翻译成简体中文。
 - 对照韩文原文和术语表，只检查句子中逻辑明显奇怪、称呼明显不一致或与术语表冲突的部分，修正疑似术语误译；不要借机重译通顺的句子。
 - 如果文本来自自动/谷歌翻译，请重点核对人称、称呼、说话对象和主语关系，修正明显的“我/你/他/她/他们/她们”等人称错误。
+- 尤其检查谷歌翻译擅自补出的不必要主语；原文没有明确主语、中文省略也自然时，优先删掉多余主语。
 - 无法从原文和上下文明确判断的问题，保持现有中文不变。
 
 【输出要求】
 - 保留其余已经正确的中文内容原样，尽量保留原有换行和段落结构。
 - 不要解释、不加注释、不输出前缀。
 - 只返回修正后的中文结果。
+"""
+
+SIMPLE_FALLBACK_FIX_SYSTEM_PROMPT = """你只负责对谷歌/机械翻译后的中文做极窄范围复核。
+
+【只允许修正】
+- 人名、称呼、专有名词与术语表明显冲突的问题。
+- 我/你/他/她/他们/她们等人称与韩文原文或上下文明显冲突的问题。
+- 谷歌翻译擅自补出的多余主语；原文没有明确主语且中文省略自然时，删掉多余主语。
+
+【禁止】
+- 不要重译整段，不要润色风格，不要补写内容。
+- 不要分析或改写敏感描写本身；只看人名、人称和主语。
+- 无法明确判断时，必须保持当前译文原样。
+
+【输出】
+- 只返回修正后的当前中文译文。
+- 不要解释、不加注释、不输出前缀。
 """
 
 
@@ -347,6 +365,13 @@ def apply_glossary_to_text(text: str, glossary: list) -> str:
 # Translation
 # ---------------------------------------------------------------------------
 
+class TranslationText(str):
+    def __new__(cls, value: str, used_google: bool = False):
+        obj = str.__new__(cls, value)
+        obj.used_google = used_google
+        return obj
+
+
 def translate_by_google(text: str) -> str:
     try:
         url = "https://translate.googleapis.com/translate_a/single"
@@ -360,6 +385,13 @@ def translate_by_google(text: str) -> str:
     except Exception:
         pass
     return text
+
+
+def translate_by_google_with_glossary(text: str, glossary: list) -> str:
+    glossary = glossary or []
+    prepared = preprocess_source_with_glossary(text, glossary)
+    translated = translate_by_google(prepared)
+    return apply_glossary_to_text(translated, glossary)
 
 
 def is_quota_error(exc: Exception) -> bool:
@@ -455,13 +487,15 @@ def translate_chunk(
                     except Exception as exc:
                         if is_quota_error(exc):
                             raise
-                        fallback_source = preprocess_source_with_glossary(sc, glossary or [])
-                        results.append(translate_by_google(fallback_source))
-                return "\n".join(results)
-        fallback_source = preprocess_source_with_glossary(chunk, glossary or [])
-        fallback = translate_by_google(fallback_source)
+                        fallback = translate_by_google_with_glossary(sc, glossary or [])
+                        results.append(TranslationText(fallback, used_google=True))
+                return TranslationText(
+                    "\n".join(results),
+                    used_google=any(getattr(result, "used_google", False) for result in results),
+                )
+        fallback = translate_by_google_with_glossary(chunk, glossary or [])
         if fallback and fallback != chunk:
-            return fallback
+            return TranslationText(fallback, used_google=True)
         raise
 
 
@@ -530,6 +564,45 @@ def fix_translation_chunk(
     return response.choices[0].message.content.strip()
 
 
+def fix_fallback_names_and_subjects_chunk(
+    client,
+    source_text,
+    translated_text,
+    previous_translation="",
+    next_translation="",
+    glossary=None,
+    index=1,
+    total=1,
+    model=MODEL_QUALITY,
+):
+    glossary_section = build_glossary_prompt_section(glossary, chunk=source_text) if glossary else ""
+    prompt = (
+        f"下面是第 {index}/{total} 段的韩文原文和谷歌/机械翻译译文。上一次完整修正可能失败，"
+        "这次只做非常窄的检查。\n\n"
+        "【只允许处理】\n"
+        "1. 人名、称呼、专有名词是否违背术语表。\n"
+        "2. 我/你/他/她/他们/她们等人称是否和原文、上下文明显冲突。\n"
+        "3. 谷歌翻译擅自补出的多余主语；原文没有明确主语且中文省略自然时，删掉多余主语。\n\n"
+        "不要翻译、补写或润色其他内容；不要处理敏感描写本身；无法明确判断时保持当前译文原样。\n\n"
+        f"{glossary_section}\n\n"
+        "【上一段中文译文，仅供判断人称和称呼】\n"
+        f"{previous_translation[-800:]}\n\n"
+        "【韩文原文】\n"
+        f"{source_text}\n\n"
+        "【当前中文译文】\n"
+        f"{translated_text}\n\n"
+        "【下一段中文译文，仅供判断人称和称呼】\n"
+        f"{next_translation[:800]}\n\n"
+        "请只输出修正后的当前中文译文。"
+    )
+    response = client.chat.completions.create(
+        model=model,
+        messages=build_chat_messages(SIMPLE_FALLBACK_FIX_SYSTEM_PROMPT, prompt, model),
+        temperature=0.1,
+    )
+    return response.choices[0].message.content.strip()
+
+
 def fix_translated_chunks(
     client,
     source_chunks,
@@ -551,18 +624,36 @@ def fix_translated_chunks(
         source = source_chunks[idx] if idx < len(source_chunks) else ""
         previous_translation = fixed[idx - 1] if idx > 0 else ""
         next_translation = translated_chunks[idx + 1] if idx < total - 1 else ""
-        fixed[idx] = fix_translation_chunk(
-            client,
-            source,
-            translated,
-            previous_translation=previous_translation,
-            next_translation=next_translation,
-            glossary=glossary,
-            used_fallback=used_fallback,
-            index=chunk_no,
-            total=total,
-            model=model,
-        )
+        try:
+            fixed[idx] = fix_translation_chunk(
+                client,
+                source,
+                translated,
+                previous_translation=previous_translation,
+                next_translation=next_translation,
+                glossary=glossary,
+                used_fallback=used_fallback,
+                index=chunk_no,
+                total=total,
+                model=model,
+            )
+        except Exception:
+            if not used_fallback:
+                raise
+            try:
+                fixed[idx] = fix_fallback_names_and_subjects_chunk(
+                    client,
+                    source,
+                    translated,
+                    previous_translation=previous_translation,
+                    next_translation=next_translation,
+                    glossary=glossary,
+                    index=chunk_no,
+                    total=total,
+                    model=model,
+                )
+            except Exception:
+                fixed[idx] = translated
 
     return "\n\n".join(fixed)
 
@@ -870,12 +961,16 @@ class handler(BaseHTTPRequestHandler):
                         ),
                         model_session_id=model_session_id,
                     )
+                    used_google = bool(getattr(translated, "used_google", False))
                     return self._send_json(200, {
-                        "ok": True, "translated": translated, "fallback": False, **meta,
+                        "ok": True,
+                        "translated": str(translated),
+                        "fallback": used_google,
+                        "note": "此 chunk 使用了机械翻译" if used_google else "",
+                        **meta,
                     })
                 except Exception:
-                    fallback_source = preprocess_source_with_glossary(chunk, glossary or [])
-                    translated = translate_by_google(fallback_source)
+                    translated = translate_by_google_with_glossary(chunk, glossary or [])
                     return self._send_json(200, {
                         "ok": True, "translated": translated, "fallback": True,
                         "note": "此 chunk 使用了机械翻译",
