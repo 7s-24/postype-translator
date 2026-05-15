@@ -183,7 +183,7 @@ function isTermsReviewOpen() {
 }
 
 function updateExtractButtonLabel() {
-  $("btn-translate").textContent = isTermsReviewOpen() ? "重新提取术语" : "提取术语并翻译";
+  $("btn-translate").textContent = isTermsReviewOpen() ? "重新提取术语" : "提取术语后翻译";
 }
 
 function setBusy(busy) {
