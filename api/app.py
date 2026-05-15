@@ -57,27 +57,27 @@ STANDARD_MODELS = [
 ]
 
 LIGHT_MODELS = [
-    "qwen-mt-flash",
-    "qwen-mt-turbo",
-    "qwen-mt-lite",
     "deepseek-v4-flash",
     "qwen-flash-2025-07-28",
     "qwen3-0.6b",
-    "qwen-turbo",
-    "qwen-flash",
     "qwen3-8b",
     "qwen3.6-flash-2026-04-16",
     "qwen3.6-flash",
     "qwen3.5-flash-2026-02-23",
     "qwen3.5-flash",
-    "qwen3-vl-flash-2025-10-15",
-    "qwen3-vl-flash-2026-01-22",
-    "qwen3-vl-flash",
 ]
 
 SENSITIVE_FALLBACK_MODELS = [
+    "qwen-mt-flash",
+    "qwen-mt-turbo",
+    "qwen-mt-lite",
+    "qwen-turbo",
+    "qwen-flash",
     "qwen-vl-max",
     "qwen-vl-plus",
+    "qwen3-vl-flash-2025-10-15",
+    "qwen3-vl-flash-2026-01-22",
+    "qwen3-vl-flash",
     "qwen3-30b-a3b-instruct-2507",
     "qwen3-next-80b-a3b-instruct",
     "qwen3-vl-235b-a22b-thinking",
