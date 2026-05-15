@@ -38,7 +38,7 @@ function scheduleToastAutoHide() {
     clearNotice();
   }, 5200);
 }
-const API_ERROR_ACTION = "如错误反复产生，请描述错误产生时的情况，并将错误码反馈至fedrick1plela755@gmail.com";
+const API_ERROR_ACTION = "如果方便的话，可以复制错误码，并描述错误产生的情况，提交给 fedrick1plela755@gmail.com 来帮助改进";
 
 function getApiError(err) {
   if (err && typeof err === "object") {
