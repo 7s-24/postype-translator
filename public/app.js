@@ -746,7 +746,7 @@ async function submitGlossaryUpload(scope = "global") {
     return;
   }
 
-  const notes = prompt(`准备提交 ${entries.length} 条${label}术语。`, "");
+  const notes = prompt(`准备提交用户术语库中的 ${entries.length} 条${label}术语，给你的术语库起个名字，或者留下一些对审核有帮助的话吧：`, "");
   if (notes === null) return;
 
   clearError();
