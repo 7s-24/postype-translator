@@ -186,7 +186,8 @@ function updateExtractButtonLabel() {
   $("btn-translate").textContent = isTermsReviewOpen() ? "重新提取术语" : "提取术语并翻译";
 }
 
-function setBusy(busy) {
+function setBusy(busy, options = {}) {
+  const { notifyComplete = true } = options;
   $("btn-translate").disabled = busy;
   $("btn-direct-translate").disabled = busy;
   $("btn-download").disabled = busy;
@@ -200,7 +201,7 @@ function setBusy(busy) {
     scheduleWaitingSnake();
   } else {
     updateExtractButtonLabel();
-    stopWaitingSnake();
+    stopWaitingSnake({ notifyComplete });
   }
 }
 
@@ -813,7 +814,7 @@ async function prepareAndExtract(options = {}) {
   } catch (err) {
     showError(err);
     $("progress-label").textContent = "失败";
-    setBusy(false);
+    setBusy(false, { notifyComplete: false });
     await endProcessingWakeLock();
   }
 }
@@ -834,6 +835,7 @@ async function translateWithGlossary(glossary) {
   const clean = glossary
     .filter(g => g.ko && g.zh)
     .map(g => ({ ko:g.ko, zh:g.zh, category:g.category }));
+  let completed = false;
 
   try {
     setProgress("准备翻译", 0, total);
@@ -958,11 +960,12 @@ async function translateWithGlossary(glossary) {
           : "已完成译文问题复核，请检查术语和人称是否符合原文。"
       );
     }
+    completed = true;
   } catch (err) {
     showError(err);
     $("progress-label").textContent = "失败";
   } finally {
-    setBusy(false);
+    setBusy(false, { notifyComplete: completed });
     await endProcessingWakeLock();
   }
 }
@@ -972,6 +975,7 @@ async function translateWithGlossary(glossary) {
 //  WAITING SNAKE GAME
 // ══════════════════════════════════════════════════════════
 const SNAKE_LEADERBOARD_KEY = "postype_snake_leaderboard";
+const SNAKE_PLAYER_NAME_KEY = "postype_snake_player_name";
 const SNAKE_AUTO_OPEN_DELAY = 4500;
 const SNAKE_GRID_SIZE = 18;
 const SNAKE_CELL_SIZE = 20;
@@ -990,17 +994,29 @@ let snakeBody = [];
 let snakeFood = null;
 let snakeFoodTerms = [];
 let snakeGameOver = false;
+let snakeScoreRecorded = false;
 
 function getSnakeCanvasContext() {
   return $("snake-board")?.getContext("2d");
 }
 
 function getSnakeFoodTerms() {
-  const terms = cleanGlossaryForExport(getGlossary())
+  const chars = cleanGlossaryForExport(getGlossary())
     .filter(t => PERSON_CATEGORIES.has(t.category))
-    .map(t => t.zh || t.ko)
-    .filter(Boolean);
-  return Array.from(new Set(terms)).slice(0, 80);
+    .flatMap(t => Array.from(t.zh || t.ko || ""))
+    .map(ch => ch.trim())
+    .filter(ch => ch && /[\u3131-\u318E\uAC00-\uD7A3\u4E00-\u9FFFA-Za-z0-9]/.test(ch));
+  return Array.from(new Set(chars)).slice(0, 120);
+}
+
+function getSnakePlayerName() {
+  return (localStorage.getItem(SNAKE_PLAYER_NAME_KEY) || "").trim();
+}
+
+function setSnakePlayerName(name) {
+  const cleanName = String(name || "").trim().slice(0, 16);
+  if (cleanName) localStorage.setItem(SNAKE_PLAYER_NAME_KEY, cleanName);
+  return cleanName;
 }
 
 function readSnakeLeaderboard() {
@@ -1016,15 +1032,28 @@ function writeSnakeLeaderboard(rows) {
   localStorage.setItem(SNAKE_LEADERBOARD_KEY, JSON.stringify(rows.slice(0, 5)));
 }
 
-function addSnakeLeaderboardScore(score) {
-  const rows = readSnakeLeaderboard();
-  rows.push({
+async function submitSnakeScoreToMongoDB(_entry) {
+  // MongoDB backend is not implemented yet. Keep this hook empty for the future API call.
+  return { ok: false, skipped: true };
+}
+
+async function addSnakeLeaderboardScore(score, options = {}) {
+  const { name = "匿名", submitGlobal = false } = options;
+  const entry = {
+    name: name || "匿名",
     score,
     food: snakeFood?.label || "术语",
     at: new Date().toLocaleString("zh-CN", { hour12: false }),
-  });
+  };
+  const rows = readSnakeLeaderboard();
+  rows.push(entry);
   rows.sort((a, b) => b.score - a.score || String(b.at).localeCompare(String(a.at)));
   writeSnakeLeaderboard(rows);
+
+  if (submitGlobal) {
+    await submitSnakeScoreToMongoDB(entry);
+  }
+
   renderSnakeLeaderboard();
 }
 
@@ -1039,8 +1068,36 @@ function renderSnakeLeaderboard() {
   }
 
   list.innerHTML = rows.map(row => (
-    `<li>${esc(row.score)} 分 · ${esc(row.food || "术语")} · ${esc(row.at || "刚刚")}</li>`
+    `<li>${esc(row.name || "匿名")} · ${esc(row.score)} 分 · ${esc(row.food || "术语")} · ${esc(row.at || "刚刚")}</li>`
   )).join("");
+}
+
+function prepareSnakeScoreForm() {
+  const nameInput = $("snake-player-name");
+  const submitButton = $("snake-submit-score");
+  if (nameInput) nameInput.value = getSnakePlayerName();
+  if (submitButton) {
+    submitButton.disabled = false;
+    submitButton.textContent = "记录成绩";
+  }
+}
+
+async function recordSnakeScore() {
+  if (snakeScoreRecorded || !snakeGameOver) return;
+
+  const name = setSnakePlayerName($("snake-player-name")?.value || "匿名") || "匿名";
+  const submitGlobal = Boolean($("snake-submit-global")?.checked);
+  const submitButton = $("snake-submit-score");
+  if (submitButton) {
+    submitButton.disabled = true;
+    submitButton.textContent = "已记录";
+  }
+
+  await addSnakeLeaderboardScore(snakeScore, { name, submitGlobal });
+  snakeScoreRecorded = true;
+  $("snake-rank-note").textContent = submitGlobal
+    ? "本局已记录；总榜同步接口暂未实装，已先保存在本机。"
+    : "本局已记录在本机排行榜。";
 }
 
 function updateSnakeHud() {
@@ -1123,10 +1180,12 @@ function resetSnakeGame({ resetRetry = false } = {}) {
     { x: 3, y: 9 },
   ];
   snakeGameOver = false;
+  snakeScoreRecorded = false;
   snakeFoodTerms = getSnakeFoodTerms();
   $("snake-gameover").classList.remove("active");
   $("snake-retry").disabled = false;
-  $("snake-rank-note").textContent = "本局得分已记录。";
+  prepareSnakeScoreForm();
+  $("snake-rank-note").textContent = "输入名字后记录本局成绩；名字会保存在本机，下次自动填入。";
   placeSnakeFood();
   updateSnakeHud();
   drawSnakeGame();
@@ -1136,10 +1195,13 @@ function endSnakeGame() {
   snakeGameOver = true;
   clearInterval(snakeInterval);
   snakeInterval = null;
-  addSnakeLeaderboardScore(snakeScore);
+  prepareSnakeScoreForm();
+  renderSnakeLeaderboard();
   $("snake-gameover").classList.add("active");
   $("snake-retry").disabled = snakeRetryLeft <= 0;
-  $("snake-rank-note").textContent = snakeRetryLeft > 0 ? "本局得分已记录，还能重试一次。" : "本局得分已记录，重试机会已用完。";
+  $("snake-rank-note").textContent = snakeRetryLeft > 0
+    ? "输入名字后记录本局成绩；还可以重试一次。"
+    : "输入名字后记录本局成绩；重试机会已用完。";
   updateSnakeHud();
 }
 
@@ -1182,7 +1244,6 @@ function openSnakeGame() {
   snakeActive = true;
   modal.classList.add("active");
   modal.setAttribute("aria-hidden", "false");
-  renderSnakeLeaderboard();
   resetSnakeGame({ resetRetry: true });
   startSnakeLoop();
 }
@@ -1207,24 +1268,46 @@ function scheduleWaitingSnake() {
   }, SNAKE_AUTO_OPEN_DELAY);
 }
 
-function stopWaitingSnake() {
+function stopWaitingSnake(options = {}) {
+  const { notifyComplete = true } = options;
   clearTimeout(snakeAutoTimer);
   snakeAutoTimer = null;
   snakeDismissedForBusy = false;
-  closeSnakeGame({ dismissed: false });
+  if (!snakeActive || !notifyComplete) return;
+  showNotice("处理已完成。小游戏不会被打断，结束后可继续查看结果。");
 }
 
 function setSnakeDirection(next) {
-  if (!snakeActive || snakeGameOver) return;
+  if (!next || !snakeActive || snakeGameOver) return;
   if (next.x + snakeDirection.x === 0 && next.y + snakeDirection.y === 0) return;
   snakeNextDirection = next;
 }
 
 function bindSnakeEvents() {
-  $("snake-close").addEventListener("click", () => closeSnakeGame());
   $("snake-hide").addEventListener("click", () => closeSnakeGame());
-  $("snake-retry").addEventListener("click", () => {
+  $("snake-submit-score").addEventListener("click", () => {
+    recordSnakeScore();
+  });
+
+  $("snake-player-name").addEventListener("change", e => {
+    setSnakePlayerName(e.target.value);
+  });
+
+  document.querySelectorAll(".snake-dir").forEach(button => {
+    button.addEventListener("click", () => {
+      const dirMap = {
+        up: { x: 0, y: -1 },
+        down: { x: 0, y: 1 },
+        left: { x: -1, y: 0 },
+        right: { x: 1, y: 0 },
+      };
+      setSnakeDirection(dirMap[button.dataset.dir]);
+    });
+  });
+
+  $("snake-retry").addEventListener("click", async () => {
     if (snakeRetryLeft <= 0) return;
+    await recordSnakeScore();
     snakeRetryLeft -= 1;
     resetSnakeGame();
     startSnakeLoop();
