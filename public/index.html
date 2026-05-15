@@ -70,7 +70,8 @@
     <!-- Actions + Fast Toggle -->
     <div class="actions-row">
       <div class="btns">
-        <button id="btn-translate" type="button">翻译</button>
+        <button id="btn-translate" type="button">提取术语后翻译</button>
+        <button id="btn-direct-translate" class="secondary" type="button">直接翻译</button>
         <button id="btn-download" class="secondary" type="button">导出 TXT</button>
       </div>
       <div class="inline-control">
@@ -86,7 +87,8 @@
         <span>持续常亮</span>
       </label> -->
     </div>
-    <p class="response-time-note">提示：部分模型响应时间较长，开始翻译后请耐心等待～</p>
+    <p class="response-time-note">提示：部分模型响应时间较长，开始翻译后请耐心等待，或者直接重试一次。</p>
+    <!-- <div id="model-order" class="model-order-test" aria-live="polite"></div> -->
 
     <div id="error" class="toast error" role="alert"></div>
     <div id="notice" class="toast notice" role="status"></div>
@@ -117,7 +119,6 @@
       </div>
       <div class="terms-actions">
         <button type="button" id="btn-confirm-translate">确认并翻译</button>
-        <button type="button" class="secondary" id="btn-skip-translate">跳过术语，直接翻译</button>
       </div>
     </div>
 
@@ -141,7 +142,7 @@
 <div id="fast-help-modal" class="help-modal">
   <div class="help-box small-help-box">
     <div class="help-section" style="margin:0;">
-      <p>如果非快速模式额度不足，可以切换快速模式继续尝试。</p>
+      <p>如果嫌弃标准模式速度太慢，可以切换快速模式继续尝试。</p>
     </div>
     <div class="help-section help-note">
       快速模式的代价是段落之间可用上下文较少，长篇剧情、称呼变化或连续对话可能需要人工检查。

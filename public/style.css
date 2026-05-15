@@ -100,6 +100,20 @@
       font-size: 13px;
       line-height: 1.5;
     }
+    .model-order-test {
+      display: none;
+      margin: -12px 0 24px;
+      padding: 8px 10px;
+      border: 1px dashed #999;
+      background: #fafafa;
+      color: #333;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+    }
+    .model-order-test.active { display: block; }
 
     /* ---- compact inline controls ---- */
     .inline-control {

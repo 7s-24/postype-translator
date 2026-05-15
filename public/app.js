@@ -48,16 +48,27 @@ function getApiError(err) {
   return null;
 }
 
+function isLoadFailedError(msg) {
+  const apiError = getApiError(msg);
+  const code = String(apiError?.code || "").toLowerCase();
+  const message = String(apiError?.message || (msg instanceof Error ? msg.message : msg) || "").toLowerCase();
+
+  return code === "loadfailed" || code === "load_failed" || message.includes("load failed");
+}
+
 function showError(msg)  {
   const e=$("error");
   const apiError = getApiError(msg);
+  const loadFailedHint = isLoadFailedError(msg)
+    ? "\n提示：翻译过程中请不要切换到其他画面、锁屏或让浏览器进入后台，否则请求可能被系统中断；；请保持本页面在前台后重试。"
+    : "";
 
   if (apiError && (apiError.code || apiError.message)) {
     const code = apiError.code || "UNKNOWN_ERROR";
     const message = apiError.message || "Request failed";
-    e.textContent = `Error code: ${code}\nMessage: ${message}\n${API_ERROR_ACTION}`;
+    e.textContent = `Error code: ${code}\nMessage: ${message}${loadFailedHint}\n${API_ERROR_ACTION}`;
   } else {
-    e.textContent="错误："+(msg instanceof Error ? msg.message : msg);
+    e.textContent="错误："+(msg instanceof Error ? msg.message : msg)+loadFailedHint;
   }
 
   e.classList.add("active");
@@ -167,14 +178,28 @@ function mergeGlossaryPreferImported(current, imported) {
   return Array.from(map.values());
 }
 
+function isTermsReviewOpen() {
+  return $("terms-review").classList.contains("active");
+}
+
+function updateExtractButtonLabel() {
+  $("btn-translate").textContent = isTermsReviewOpen() ? "重新提取术语" : "提取术语并翻译";
+}
+
 function setBusy(busy) {
   $("btn-translate").disabled = busy;
+  $("btn-direct-translate").disabled = busy;
   $("btn-download").disabled = busy;
   $("file-html").disabled = busy;
   $("manual-html").disabled = busy;
   $("url").disabled = busy;
   $("fast-mode").disabled = busy;
-  $("btn-translate").textContent = busy ? "处理中…" : "翻译";
+
+  if (busy) {
+    $("btn-translate").textContent = "处理中…";
+  } else {
+    updateExtractButtonLabel();
+  }
 }
 
 function readFile(file) {
@@ -578,6 +603,46 @@ $("glossary-toggle").addEventListener("click", () => {
 // ══════════════════════════════════════════════════════════
 let pendingChunks = [];
 let mergedGlossary = [];
+let currentModelSessionId = "";
+let currentModelOrder = [];
+
+function createModelSessionId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function resetModelOrderDisplay() {
+  currentModelOrder = [];
+  const el = $("model-order");
+  if (!el) return;
+  el.textContent = "";
+  el.classList.remove("active");
+}
+
+function setModelOrderDisplay(status) {
+  const order = Array.isArray(status?.modelOrder) ? status.modelOrder : [];
+  if (!order.length) return;
+
+  currentModelOrder = order;
+  const tier = status?.tier || (isFast() ? "light" : "standard");
+  const el = $("model-order");
+  if (!el) return;
+  el.textContent = `测试：本次${modelTierLabel(tier)}顺序：${order.join(" → ")}`;
+  el.classList.add("active");
+}
+
+async function loadModelOrderForCurrentSession(fast) {
+  if (!currentModelSessionId) currentModelSessionId = createModelSessionId();
+  const status = await postJSON({
+    action: "model_status",
+    fast,
+    modelSessionId: currentModelSessionId,
+  });
+  setModelOrderDisplay(status);
+  return status.modelOrder || [];
+}
 
 function renderTermsTable() {
   const tbody = $("terms-tbody");
@@ -653,10 +718,12 @@ function showTermsReview(global, article) {
 
   renderTermsTable();
   $("terms-review").classList.add("active");
+  updateExtractButtonLabel();
 }
 
 function hideTermsReview() {
   $("terms-review").classList.remove("active");
+  updateExtractButtonLabel();
 }
 
 // ══════════════════════════════════════════════════════════
@@ -664,7 +731,8 @@ function hideTermsReview() {
 // ══════════════════════════════════════════════════════════
 
 // Phase 1: Prepare + Extract
-async function prepareAndExtract() {
+async function prepareAndExtract(options = {}) {
+  const { skipTermExtraction = false } = options;
   const url = $("url").value.trim();
   const manual = $("manual-html").value.trim();
   const fileInput = $("file-html");
@@ -685,6 +753,9 @@ async function prepareAndExtract() {
     return;
   }
 
+  currentModelSessionId = createModelSessionId();
+  resetModelOrderDisplay();
+
   clearError();
   clearNotice();
   hideTermsReview();
@@ -694,6 +765,8 @@ async function prepareAndExtract() {
   await beginProcessingWakeLock();
 
   try {
+    await loadModelOrderForCurrentSession(isFast());
+
     let prep;
 
     if (file) {
@@ -711,8 +784,18 @@ async function prepareAndExtract() {
     if (!chunks.length) throw new Error("正文为空");
     pendingChunks = chunks;
 
+    if (skipTermExtraction) {
+      await translateWithGlossary(getGlossary().map(g => ({ ...g, _src:"global" })));
+      return;
+    }
+
     setProgress("提取术语", 0, 1);
-    const ext = await postJSON({ action: "extract_terms", text: chunks.join("\n\n") });
+    const ext = await postJSON({
+      action: "extract_terms",
+      text: chunks.join("\n\n"),
+      modelSessionId: currentModelSessionId,
+    });
+    setModelOrderDisplay(ext);
     const articleTerms = ext.terms || [];
 
     $("progress").classList.remove("active");
@@ -752,6 +835,7 @@ async function translateWithGlossary(glossary) {
 
   try {
     setProgress("准备翻译", 0, total);
+    await loadModelOrderForCurrentSession(fast);
   
     setProgress("翻译中", 0, total);
     const parts = new Array(total).fill("");
@@ -778,6 +862,7 @@ async function translateWithGlossary(glossary) {
               previous: j === start ? lastPrev : "",
               glossary: clean,
               fast: true,
+              modelSessionId: currentModelSessionId,
             })
           );
         }
@@ -788,6 +873,7 @@ async function translateWithGlossary(glossary) {
           const idx = start + j;
           parts[idx] = results[j].translated || "";
           if (results[j].fallback) fallbackList.push(idx + 1);
+          if (results[j].modelOrder) setModelOrderDisplay(results[j]);
           if (results[j].switchedModel && results[j].model) switchedModels.set(idx + 1, results[j].model);
         }
 
@@ -809,10 +895,12 @@ async function translateWithGlossary(glossary) {
           previous: prev,
           glossary: clean,
           fast: false,
+          modelSessionId: currentModelSessionId,
         });
 
         parts[i] = data.translated || "";
         if (data.fallback) fallbackList.push(i + 1);
+        if (data.modelOrder) setModelOrderDisplay(data);
         if (data.switchedModel && data.model) switchedModels.set(i + 1, data.model);
         $("output").value = parts.filter(Boolean).join("\n\n");
         setProgress("翻译中", i + 1, total);
@@ -852,7 +940,10 @@ async function translateWithGlossary(glossary) {
         fallback_indices: fallbackList,
         glossary: clean,
         fast,
+        modelSessionId: currentModelSessionId,
       });
+
+      if (fix.modelOrder) setModelOrderDisplay(fix);
 
       if (fix.fixed_text) {
         text = fix.fixed_text;
@@ -875,15 +966,13 @@ async function translateWithGlossary(glossary) {
 }
 
 // ── Events ───────────────────────────────────────────────
-$("btn-translate").addEventListener("click", prepareAndExtract);
+$("btn-translate").addEventListener("click", () => prepareAndExtract());
+$("btn-direct-translate").addEventListener("click", () => prepareAndExtract({ skipTermExtraction: true }));
 
 $("btn-confirm-translate").addEventListener("click", () => {
   translateWithGlossary(mergedGlossary);
 });
 
-$("btn-skip-translate").addEventListener("click", () => {
-  translateWithGlossary(getGlossary().map(g => ({ ...g, _src:"global" })));
-});
 
 $("btn-download").addEventListener("click", () => {
   const text = $("output").value.trim();

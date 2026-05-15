@@ -9,6 +9,7 @@ import time
 import plistlib
 import base64
 import io
+import random
 import urllib.parse
 
 from api.db import (
@@ -24,55 +25,66 @@ from api.db import (
 # Models & config
 # ---------------------------------------------------------------------------
 STANDARD_MODELS = [
-    # "qwen3.6-max-preview",
-    "qwen3-max",
-    "qwen3-max-2026-01-23",
-    "qwen3-max-2025-09-23",
-    # "qwen3.6-plus",
-    "qwen3.5-plus-2026-02-15",
-    "deepseek-v4-pro",
-    "deepseek-v3.2",
-    "qwen-plus-latest",
+    "qwen3-next-80b-a3b-instruct",
     "qwen-plus-2025-09-11",
+    "qwen3-30b-a3b-instruct-2507",
+    "qwen-plus-2025-07-14",
+    "qwen3-235b-a22b-instruct-2507",
+    "deepseek-v3.2",
     "qwen-plus-2025-04-28",
-    "qwen3.5-397b-a17b",
-    "qwen3.5-122b-a10b",
-    "qwen3-235b-a22b",
-    "qwen3-235b-a22b-thinking-2507",
-    "qwen3-30b-a3b-thinking-2507",
-    "qwen3.6-27b",
-    "qwen3.5-35b-a3b",
-    "qwen3.5-27b",
-    "qwen3-30b-a3b",
+    "qwen-plus-latest",
+    "qwen3-max-2026-01-23",
+    "qwen3-max",
+    "qwen3-max-2025-09-23",
     "qwen3-32b",
+    "qwen3-235b-a22b",
     "qwen3-14b",
-    "qwen3-vl-235b-a22b-thinking",
-    "qwen3-vl-235b-a22b-instruct",
-    "qwen3-vl-30b-a3b-thinking",
-    "qwen3-vl-30b-a3b-instruct",
-    "qwen3-vl-8b-thinking",
+    "qwen3.6-35b-a3b",
+    "qwen3.5-122b-a10b",
+    "deepseek-v4-pro",
+    "qwen3-30b-a3b-thinking-2507",
+    "qwen3-235b-a22b-thinking-2507",
+    "qwen3.5-35b-a3b",
+    "qwen3-30b-a3b",
+    "qwq-plus",
+    "qwen3.5-27b",
+    "qwen3.6-27b",
+    "qwen3.6-max-preview",
+    "qwen3.5-plus-2026-04-20",
+    "qwen3.5-plus",
+    "qwen3.6-plus",
+    "qwen3.6-plus-2026-04-02",
+    "qwen3.5-397b-a17b",
+    "qwen3.5-plus-2026-02-15",
     "qwen3-vl-8b-instruct",
+    "qwen-vl-plus",
+    "qwen3-vl-30b-a3b-instruct",
+    "qwen3-vl-plus",
     "qwen3-vl-plus-2025-12-19",
     "qwen3-vl-plus-2025-09-23",
-    "qwen3-vl-plus",
     "qwen-vl-max",
-    "qwen-vl-plus",
+    "qwen3-vl-235b-a22b-instruct",
+    "qwen3-vl-30b-a3b-thinking",
+    "qwen3-vl-8b-thinking",
+    "qwen3-vl-235b-a22b-thinking",
 ]
 
 LIGHT_MODELS = [
     "qwen-mt-flash",
     "qwen-mt-turbo",
     "qwen-mt-lite",
-    "qwen3.6-flash",
-    "qwen3.6-flash-2026-04-16",
-    "qwen3.5-flash",
-    "qwen3.5-flash-2026-02-23",
     "deepseek-v4-flash",
-    "qwen-turbo",
-    "qwen3-8b",
+    "qwen-flash-2025-07-28",
     "qwen3-0.6b",
-    "qwen3-vl-flash-2026-01-22",
+    "qwen-turbo",
+    "qwen-flash",
+    "qwen3-8b",
+    "qwen3.6-flash-2026-04-16",
+    "qwen3.6-flash",
+    "qwen3.5-flash-2026-02-23",
+    "qwen3.5-flash",
     "qwen3-vl-flash-2025-10-15",
+    "qwen3-vl-flash-2026-01-22",
     "qwen3-vl-flash",
 ]
 
@@ -654,10 +666,19 @@ class handler(BaseHTTPRequestHandler):
             "exhaustedModels": list(tier_state.get("exhaustedModels", [])),
         }
 
-    def _ordered_models(self, tier):
+    def _ordered_models(self, tier, model_session_id=None):
         status = self._current_model_status(tier)
         models = status["models"]
         exhausted = set(status["exhaustedModels"])
+
+        if model_session_id:
+            active = [model for model in models if model not in exhausted]
+            if active:
+                rng = random.Random(f"{tier}:{model_session_id}")
+                rng.shuffle(active)
+                return active
+            return models
+
         start = status["currentIndex"]
         active = [
             models[(start + offset) % len(models)]
@@ -665,6 +686,13 @@ class handler(BaseHTTPRequestHandler):
             if models[(start + offset) % len(models)] not in exhausted
         ]
         return active or models
+
+    def _model_session_id(self, data):
+        value = data.get("modelSessionId") or data.get("model_session_id")
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value[:200] or None
 
     def _mark_model_exhausted(self, tier, model):
         models = self._models_for_tier(tier)
@@ -683,8 +711,8 @@ class handler(BaseHTTPRequestHandler):
             tier_state["currentIndex"] = 0
         self._save_model_state(state)
 
-    def _run_with_model_rotation(self, tier, callback, rotate_on_bad_request=False):
-        models = self._ordered_models(tier)
+    def _run_with_model_rotation(self, tier, callback, rotate_on_bad_request=False, model_session_id=None):
+        models = self._ordered_models(tier, model_session_id=model_session_id)
         first_model = models[0]
         last_exc = None
 
@@ -697,6 +725,7 @@ class handler(BaseHTTPRequestHandler):
                     "model": model,
                     "switchedModel": model != first_model,
                     "currentModel": status["model"],
+                    "modelOrder": models,
                     "exhaustedModels": status["exhaustedModels"],
                 }
             except Exception as exc:
@@ -743,7 +772,10 @@ class handler(BaseHTTPRequestHandler):
             # === MODEL STATUS ===
             if action == "model_status":
                 tier = self._tier_name(data)
+                model_session_id = self._model_session_id(data)
                 status = self._current_model_status(tier)
+                if model_session_id:
+                    status["modelOrder"] = self._ordered_models(tier, model_session_id=model_session_id)
                 return self._send_json(200, {"ok": True, **status})
 
             # === PREPARE ===
@@ -775,6 +807,7 @@ class handler(BaseHTTPRequestHandler):
 
             # === EXTRACT TERMS ===
             if action == "extract_terms":
+                model_session_id = self._model_session_id(data)
                 text = data.get("text", "")
                 if not text:
                     return self._send_json(200, {"ok": True, "terms": []})
@@ -787,6 +820,7 @@ class handler(BaseHTTPRequestHandler):
                 terms, meta = self._run_with_model_rotation(
                     "standard",
                     lambda model: extract_terms(client, text, model=model),
+                    model_session_id=model_session_id,
                 )
                 return self._send_json(200, {"ok": True, "terms": terms, **meta})
 
@@ -811,6 +845,7 @@ class handler(BaseHTTPRequestHandler):
 
             # === TRANSLATE ===
             if action == "translate":
+                model_session_id = self._model_session_id(data)
                 chunk = data.get("chunk", "")
                 index = int(data.get("index", 1))
                 total = int(data.get("total", 1))
@@ -833,6 +868,7 @@ class handler(BaseHTTPRequestHandler):
                             client, chunk, index, total, previous,
                             glossary=glossary, model=model,
                         ),
+                        model_session_id=model_session_id,
                     )
                     return self._send_json(200, {
                         "ok": True, "translated": translated, "fallback": False, **meta,
@@ -843,10 +879,12 @@ class handler(BaseHTTPRequestHandler):
                     return self._send_json(200, {
                         "ok": True, "translated": translated, "fallback": True,
                         "note": "此 chunk 使用了机械翻译",
+                        "modelOrder": self._ordered_models(tier, model_session_id=model_session_id),
                     })
 
             # === FIX ===
             if action == "fix":
+                model_session_id = self._model_session_id(data)
                 translated_text = data.get("translated_text", "")
                 if not translated_text:
                     status, payload = error_response("MISSING_TRANSLATED_TEXT", 400)
@@ -875,12 +913,14 @@ class handler(BaseHTTPRequestHandler):
                             model=model,
                         ),
                         rotate_on_bad_request=True,
+                        model_session_id=model_session_id,
                     )
                 else:
                     fixed, meta = self._run_with_model_rotation(
                         tier,
                         lambda model: fix_korean_text(client, translated_text, model=model),
                         rotate_on_bad_request=True,
+                        model_session_id=model_session_id,
                     )
                 return self._send_json(200, {"ok": True, "fixed_text": fixed, **meta})
 
