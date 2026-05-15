@@ -197,8 +197,10 @@ function setBusy(busy) {
 
   if (busy) {
     $("btn-translate").textContent = "处理中…";
+    scheduleWaitingSnake();
   } else {
     updateExtractButtonLabel();
+    stopWaitingSnake();
   }
 }
 
@@ -965,6 +967,287 @@ async function translateWithGlossary(glossary) {
   }
 }
 
+
+// ══════════════════════════════════════════════════════════
+//  WAITING SNAKE GAME
+// ══════════════════════════════════════════════════════════
+const SNAKE_LEADERBOARD_KEY = "postype_snake_leaderboard";
+const SNAKE_AUTO_OPEN_DELAY = 4500;
+const SNAKE_GRID_SIZE = 18;
+const SNAKE_CELL_SIZE = 20;
+const SNAKE_TICK_MS = 135;
+const PERSON_CATEGORIES = new Set(["人名", "艺名", "本名", "称呼"]);
+
+let snakeAutoTimer = null;
+let snakeInterval = null;
+let snakeActive = false;
+let snakeDismissedForBusy = false;
+let snakeRetryLeft = 1;
+let snakeScore = 0;
+let snakeDirection = { x: 1, y: 0 };
+let snakeNextDirection = { x: 1, y: 0 };
+let snakeBody = [];
+let snakeFood = null;
+let snakeFoodTerms = [];
+let snakeGameOver = false;
+
+function getSnakeCanvasContext() {
+  return $("snake-board")?.getContext("2d");
+}
+
+function getSnakeFoodTerms() {
+  const terms = cleanGlossaryForExport(getGlossary())
+    .filter(t => PERSON_CATEGORIES.has(t.category))
+    .map(t => t.zh || t.ko)
+    .filter(Boolean);
+  return Array.from(new Set(terms)).slice(0, 80);
+}
+
+function readSnakeLeaderboard() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SNAKE_LEADERBOARD_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter(r => Number.isFinite(r.score)).slice(0, 5) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSnakeLeaderboard(rows) {
+  localStorage.setItem(SNAKE_LEADERBOARD_KEY, JSON.stringify(rows.slice(0, 5)));
+}
+
+function addSnakeLeaderboardScore(score) {
+  const rows = readSnakeLeaderboard();
+  rows.push({
+    score,
+    food: snakeFood?.label || "术语",
+    at: new Date().toLocaleString("zh-CN", { hour12: false }),
+  });
+  rows.sort((a, b) => b.score - a.score || String(b.at).localeCompare(String(a.at)));
+  writeSnakeLeaderboard(rows);
+  renderSnakeLeaderboard();
+}
+
+function renderSnakeLeaderboard() {
+  const list = $("snake-leaderboard");
+  if (!list) return;
+
+  const rows = readSnakeLeaderboard();
+  if (!rows.length) {
+    list.innerHTML = '<li class="empty">还没有记录，先来一局。</li>';
+    return;
+  }
+
+  list.innerHTML = rows.map(row => (
+    `<li>${esc(row.score)} 分 · ${esc(row.food || "术语")} · ${esc(row.at || "刚刚")}</li>`
+  )).join("");
+}
+
+function updateSnakeHud() {
+  $("snake-score").textContent = snakeScore;
+  $("snake-food-name").textContent = snakeFood?.label || "术语";
+  $("snake-retry-left").textContent = snakeRetryLeft;
+}
+
+function sameSnakePoint(a, b) {
+  return a.x === b.x && a.y === b.y;
+}
+
+function randomSnakeCell() {
+  return {
+    x: Math.floor(Math.random() * SNAKE_GRID_SIZE),
+    y: Math.floor(Math.random() * SNAKE_GRID_SIZE),
+  };
+}
+
+function placeSnakeFood() {
+  let pos = randomSnakeCell();
+  while (snakeBody.some(part => sameSnakePoint(part, pos))) {
+    pos = randomSnakeCell();
+  }
+
+  const label = snakeFoodTerms.length
+    ? snakeFoodTerms[Math.floor(Math.random() * snakeFoodTerms.length)]
+    : "术语";
+  snakeFood = { ...pos, label };
+  updateSnakeHud();
+}
+
+function drawSnakeGame() {
+  const ctx = getSnakeCanvasContext();
+  if (!ctx) return;
+
+  ctx.clearRect(0, 0, SNAKE_GRID_SIZE * SNAKE_CELL_SIZE, SNAKE_GRID_SIZE * SNAKE_CELL_SIZE);
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, SNAKE_GRID_SIZE * SNAKE_CELL_SIZE, SNAKE_GRID_SIZE * SNAKE_CELL_SIZE);
+
+  ctx.strokeStyle = "#eee";
+  ctx.lineWidth = 1;
+  for (let i = 1; i < SNAKE_GRID_SIZE; i++) {
+    const p = i * SNAKE_CELL_SIZE + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(p, 0);
+    ctx.lineTo(p, SNAKE_GRID_SIZE * SNAKE_CELL_SIZE);
+    ctx.moveTo(0, p);
+    ctx.lineTo(SNAKE_GRID_SIZE * SNAKE_CELL_SIZE, p);
+    ctx.stroke();
+  }
+
+  if (snakeFood) {
+    ctx.fillStyle = "#fff";
+    ctx.strokeStyle = "#111";
+    ctx.lineWidth = 2;
+    ctx.fillRect(snakeFood.x * SNAKE_CELL_SIZE + 2, snakeFood.y * SNAKE_CELL_SIZE + 2, SNAKE_CELL_SIZE - 4, SNAKE_CELL_SIZE - 4);
+    ctx.strokeRect(snakeFood.x * SNAKE_CELL_SIZE + 2.5, snakeFood.y * SNAKE_CELL_SIZE + 2.5, SNAKE_CELL_SIZE - 5, SNAKE_CELL_SIZE - 5);
+    ctx.fillStyle = "#111";
+    ctx.font = "700 10px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(String(snakeFood.label).slice(0, 2), snakeFood.x * SNAKE_CELL_SIZE + 10, snakeFood.y * SNAKE_CELL_SIZE + 10, 16);
+  }
+
+  snakeBody.forEach((part, index) => {
+    ctx.fillStyle = index === 0 ? "#111" : "#444";
+    ctx.fillRect(part.x * SNAKE_CELL_SIZE + 2, part.y * SNAKE_CELL_SIZE + 2, SNAKE_CELL_SIZE - 4, SNAKE_CELL_SIZE - 4);
+  });
+}
+
+function resetSnakeGame({ resetRetry = false } = {}) {
+  if (resetRetry) snakeRetryLeft = 1;
+  snakeScore = 0;
+  snakeDirection = { x: 1, y: 0 };
+  snakeNextDirection = { x: 1, y: 0 };
+  snakeBody = [
+    { x: 5, y: 9 },
+    { x: 4, y: 9 },
+    { x: 3, y: 9 },
+  ];
+  snakeGameOver = false;
+  snakeFoodTerms = getSnakeFoodTerms();
+  $("snake-gameover").classList.remove("active");
+  $("snake-retry").disabled = false;
+  $("snake-rank-note").textContent = "本局得分已记录。";
+  placeSnakeFood();
+  updateSnakeHud();
+  drawSnakeGame();
+}
+
+function endSnakeGame() {
+  snakeGameOver = true;
+  clearInterval(snakeInterval);
+  snakeInterval = null;
+  addSnakeLeaderboardScore(snakeScore);
+  $("snake-gameover").classList.add("active");
+  $("snake-retry").disabled = snakeRetryLeft <= 0;
+  $("snake-rank-note").textContent = snakeRetryLeft > 0 ? "本局得分已记录，还能重试一次。" : "本局得分已记录，重试机会已用完。";
+  updateSnakeHud();
+}
+
+function tickSnakeGame() {
+  if (snakeGameOver) return;
+
+  snakeDirection = snakeNextDirection;
+  const head = snakeBody[0];
+  const next = { x: head.x + snakeDirection.x, y: head.y + snakeDirection.y };
+  const hitsWall = next.x < 0 || next.y < 0 || next.x >= SNAKE_GRID_SIZE || next.y >= SNAKE_GRID_SIZE;
+  const hitsSelf = snakeBody.some(part => sameSnakePoint(part, next));
+
+  if (hitsWall || hitsSelf) {
+    endSnakeGame();
+    drawSnakeGame();
+    return;
+  }
+
+  snakeBody.unshift(next);
+  if (snakeFood && sameSnakePoint(next, snakeFood)) {
+    snakeScore += 10;
+    placeSnakeFood();
+  } else {
+    snakeBody.pop();
+  }
+
+  updateSnakeHud();
+  drawSnakeGame();
+}
+
+function startSnakeLoop() {
+  clearInterval(snakeInterval);
+  snakeInterval = setInterval(tickSnakeGame, SNAKE_TICK_MS);
+}
+
+function openSnakeGame() {
+  const modal = $("snake-modal");
+  if (!modal || snakeActive) return;
+
+  snakeActive = true;
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+  renderSnakeLeaderboard();
+  resetSnakeGame({ resetRetry: true });
+  startSnakeLoop();
+}
+
+function closeSnakeGame({ dismissed = true } = {}) {
+  const modal = $("snake-modal");
+  if (!modal) return;
+
+  if (dismissed) snakeDismissedForBusy = true;
+  snakeActive = false;
+  modal.classList.remove("active");
+  modal.setAttribute("aria-hidden", "true");
+  clearInterval(snakeInterval);
+  snakeInterval = null;
+}
+
+function scheduleWaitingSnake() {
+  clearTimeout(snakeAutoTimer);
+  snakeDismissedForBusy = false;
+  snakeAutoTimer = setTimeout(() => {
+    if (!snakeDismissedForBusy) openSnakeGame();
+  }, SNAKE_AUTO_OPEN_DELAY);
+}
+
+function stopWaitingSnake() {
+  clearTimeout(snakeAutoTimer);
+  snakeAutoTimer = null;
+  snakeDismissedForBusy = false;
+  closeSnakeGame({ dismissed: false });
+}
+
+function setSnakeDirection(next) {
+  if (!snakeActive || snakeGameOver) return;
+  if (next.x + snakeDirection.x === 0 && next.y + snakeDirection.y === 0) return;
+  snakeNextDirection = next;
+}
+
+function bindSnakeEvents() {
+  $("snake-close").addEventListener("click", () => closeSnakeGame());
+  $("snake-hide").addEventListener("click", () => closeSnakeGame());
+  $("snake-retry").addEventListener("click", () => {
+    if (snakeRetryLeft <= 0) return;
+    snakeRetryLeft -= 1;
+    resetSnakeGame();
+    startSnakeLoop();
+  });
+
+  document.addEventListener("keydown", e => {
+    const keyMap = {
+      ArrowUp: { x: 0, y: -1 },
+      KeyW: { x: 0, y: -1 },
+      ArrowDown: { x: 0, y: 1 },
+      KeyS: { x: 0, y: 1 },
+      ArrowLeft: { x: -1, y: 0 },
+      KeyA: { x: -1, y: 0 },
+      ArrowRight: { x: 1, y: 0 },
+      KeyD: { x: 1, y: 0 },
+    };
+    const next = keyMap[e.code];
+    if (!next || !snakeActive) return;
+    e.preventDefault();
+    setSnakeDirection(next);
+  });
+}
+
 // ── Events ───────────────────────────────────────────────
 $("btn-translate").addEventListener("click", () => prepareAndExtract());
 $("btn-direct-translate").addEventListener("click", () => prepareAndExtract({ skipTermExtraction: true }));
@@ -1067,5 +1350,6 @@ $("help-modal").addEventListener("click", e => {
 });
 
 // ── Init ─────────────────────────────────────────────────
+bindSnakeEvents();
 updateGlossaryModeLabel();
 loadGlossaryPresets();

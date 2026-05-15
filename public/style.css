@@ -467,3 +467,152 @@
       width: 16px;
       height: 16px;
     }
+
+/* ---- waiting snake game ---- */
+.snake-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(255, 255, 255, 0.74);
+}
+.snake-modal.active { display: flex; }
+.snake-box {
+  width: min(460px, calc(100vw - 36px));
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
+  border: 1px solid #111;
+  background: #fff;
+  padding: 18px;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.14);
+}
+.snake-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #111;
+}
+.snake-title {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.snake-subtitle {
+  margin: 0;
+  color: #555;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.snake-icon-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+  letter-spacing: 0;
+}
+.snake-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0;
+  margin: 12px 0;
+  border: 1px solid #ddd;
+  background: #fafafa;
+}
+.snake-stats span {
+  min-width: 0;
+  padding: 8px 10px;
+  border-right: 1px solid #ddd;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #555;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.snake-stats span:last-child { border-right: none; }
+.snake-stats strong { color: #111; }
+.snake-board {
+  display: block;
+  width: 100%;
+  max-width: 360px;
+  height: auto;
+  margin: 0 auto 12px;
+  border: 1px solid #111;
+  background: #fff;
+  image-rendering: pixelated;
+}
+.snake-gameover {
+  display: none;
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid #111;
+  background: #fafafa;
+}
+.snake-gameover.active { display: block; }
+.snake-gameover-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.snake-gameover p {
+  margin: 6px 0 10px;
+  color: #555;
+  font-size: 13px;
+}
+.snake-actions {
+  display: flex;
+  gap: 0;
+  flex-wrap: wrap;
+}
+.snake-actions button {
+  padding: 8px 14px;
+  font-size: 12px;
+}
+.snake-rank {
+  border-top: 1px solid #ddd;
+  padding-top: 12px;
+}
+.snake-rank-title {
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.snake-leaderboard {
+  margin: 0;
+  padding-left: 24px;
+  font-size: 13px;
+  color: #333;
+}
+.snake-leaderboard li {
+  margin: 4px 0;
+  padding-left: 4px;
+}
+.snake-leaderboard .empty {
+  color: #777;
+  list-style: none;
+  margin-left: -24px;
+}
+
+@media (max-width: 520px) {
+  .snake-modal { align-items: flex-end; }
+  .snake-box { padding: 14px; }
+  .snake-stats { grid-template-columns: 1fr; }
+  .snake-stats span {
+    border-right: none;
+    border-bottom: 1px solid #ddd;
+  }
+  .snake-stats span:last-child { border-bottom: none; }
+}

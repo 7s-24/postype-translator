@@ -198,6 +198,36 @@
     <button id="help-close" class="help-close secondary" type="button">关闭</button>
   </div>
 </div>
+
+<div id="snake-modal" class="snake-modal" aria-hidden="true">
+  <div class="snake-box" role="dialog" aria-modal="false" aria-labelledby="snake-title">
+    <div class="snake-head">
+      <div>
+        <h2 id="snake-title" class="snake-title">等待小游戏：术语贪吃蛇</h2>
+        <p id="snake-subtitle" class="snake-subtitle">用方向键 / WASD 吃掉用户术语库里的人名。</p>
+      </div>
+      <button id="snake-close" class="snake-icon-btn secondary" type="button" aria-label="暂时关闭小游戏">×</button>
+    </div>
+    <div class="snake-stats" aria-live="polite">
+      <span>得分 <strong id="snake-score">0</strong></span>
+      <span>豆子 <strong id="snake-food-name">术语</strong></span>
+      <span>重试 <strong id="snake-retry-left">1</strong></span>
+    </div>
+    <canvas id="snake-board" class="snake-board" width="360" height="360" aria-label="贪吃蛇游戏区域"></canvas>
+    <div id="snake-gameover" class="snake-gameover" aria-live="polite">
+      <div class="snake-gameover-title">撞墙了，先缓缓。</div>
+      <p id="snake-rank-note">本局得分已记录。</p>
+      <div class="snake-actions">
+        <button id="snake-retry" type="button">重试一次</button>
+        <button id="snake-hide" class="secondary" type="button">继续等待</button>
+      </div>
+    </div>
+    <div class="snake-rank">
+      <div class="snake-rank-title">排行榜</div>
+      <ol id="snake-leaderboard" class="snake-leaderboard"></ol>
+    </div>
+  </div>
+</div>
 <script src="app.js" defer></script>
 </body>
 </html>
