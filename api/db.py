@@ -182,6 +182,7 @@ def sanitize_glossary_upload(payload):
         "sourceUrl": _require_string(payload, "sourceUrl", 2048, required=False),
         "sourceTitle": _require_string(payload, "sourceTitle", 300, required=False),
         "locale": _require_string(payload, "locale", 40, required=False) or "ko-zh-CN",
+        "submitterNickname": _require_string(payload, "submitterNickname", 80, required=False),
         "notes": _require_string(payload, "notes", 1000, required=False),
         "status": "draft",
         "entries": entries,

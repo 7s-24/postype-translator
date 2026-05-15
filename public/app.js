@@ -3,6 +3,7 @@ const CATEGORIES = ["人名","地名","技能","称号","物品","组织","称�
 const STORAGE_KEY = "postype_global_glossary";
 const PRESET_STORAGE_KEY = "postype_glossary_preset";
 const GLOSSARY_MODE_KEY = "postype_glossary_mode";
+const GLOSSARY_SUBMITTER_NICKNAME_KEY = "postype_glossary_submitter_nickname";
 const BATCH_SIZE = 4; // parallel concurrency
 
 const DEFAULT_GLOSSARY = [
@@ -714,6 +715,90 @@ function getOrCreateGlossarySubmitterId() {
   return id;
 }
 
+function getSavedGlossarySubmitterNickname() {
+  return localStorage.getItem(GLOSSARY_SUBMITTER_NICKNAME_KEY) || "";
+}
+
+function saveGlossarySubmitterNickname(nickname) {
+  const clean = String(nickname || "").trim();
+
+  if (clean) {
+    localStorage.setItem(GLOSSARY_SUBMITTER_NICKNAME_KEY, clean);
+  } else {
+    localStorage.removeItem(GLOSSARY_SUBMITTER_NICKNAME_KEY);
+  }
+
+  return clean;
+}
+
+function closeGlossarySubmitModal() {
+  const modal = $("glossary-submit-modal");
+  if (modal) {
+    modal.classList.remove("active");
+    modal.setAttribute("aria-hidden", "true");
+  }
+}
+
+function openGlossarySubmitModal(entriesCount, label) {
+  const modal = $("glossary-submit-modal");
+  const form = $("glossary-submit-form");
+  const count = $("glossary-submit-count");
+  const nickname = $("glossary-submit-nickname");
+  const notes = $("glossary-submit-notes");
+  const cancel = $("glossary-submit-cancel");
+
+  if (!modal || !form || !nickname || !notes || !cancel) {
+    const fallbackNotes = prompt(`准备提交 ${entriesCount} 条${label}，给你的术语库起个名字，并且告诉我们应该如何称呼你吧：`, "");
+    if (fallbackNotes === null) return Promise.resolve(null);
+    return Promise.resolve({ nickname: "", notes: String(fallbackNotes || "").trim() });
+  }
+
+  if (count) count.textContent = `${entriesCount} 条${label}`;
+  nickname.value = getSavedGlossarySubmitterNickname();
+  notes.value = "";
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+
+  return new Promise(resolve => {
+    const finish = result => {
+      form.removeEventListener("submit", onSubmit);
+      cancel.removeEventListener("click", onCancel);
+      modal.removeEventListener("click", onBackdropClick);
+      document.removeEventListener("keydown", onKeydown);
+      closeGlossarySubmitModal();
+      resolve(result);
+    };
+
+    const onSubmit = e => {
+      e.preventDefault();
+      const submitterNickname = saveGlossarySubmitterNickname(nickname.value);
+      finish({
+        nickname: submitterNickname,
+        notes: String(notes.value || "").trim(),
+      });
+    };
+
+    const onCancel = () => finish(null);
+
+    const onBackdropClick = e => {
+      if (e.target === modal) finish(null);
+    };
+
+    const onKeydown = e => {
+      if (e.key === "Escape") finish(null);
+    };
+
+    form.addEventListener("submit", onSubmit);
+    cancel.addEventListener("click", onCancel);
+    modal.addEventListener("click", onBackdropClick);
+    document.addEventListener("keydown", onKeydown);
+
+    requestAnimationFrame(() => {
+      (nickname.value ? notes : nickname).focus();
+    });
+  });
+}
+
 function safeHttpUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -746,8 +831,8 @@ async function submitGlossaryUpload(scope = "global") {
     return;
   }
 
-  const notes = prompt(`准备提交 ${entries.length} 条${label}，给你的术语库起个名字，并且告诉我们应该如何称呼你吧：`, "");
-  if (notes === null) return;
+  const submitMeta = await openGlossarySubmitModal(entries.length, label);
+  if (!submitMeta) return;
 
   clearError();
   if (btn) btn.disabled = true;
@@ -761,7 +846,8 @@ async function submitGlossaryUpload(scope = "global") {
         sourceUrl,
         sourceTitle: document.title || "韩文同人翻译器",
         locale: "ko-zh-CN",
-        notes: String(notes || "").trim() || `${label}提交`,
+        submitterNickname: submitMeta.nickname,
+        notes: submitMeta.notes || `${label}提交`,
         entries,
       },
     });
