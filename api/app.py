@@ -82,6 +82,20 @@ LIGHT_MODELS = [
     "qwen3-vl-flash",
 ]
 
+SENSITIVE_FALLBACK_MODELS = [
+    "qwen-vl-max",
+    "qwen-vl-plus",
+    "qwen3-30b-a3b-instruct-2507",
+    "qwen3-next-80b-a3b-instruct",
+    "qwen3-vl-235b-a22b-thinking",
+    "qwen3-vl-30b-a3b-instruct",
+    "qwen3-vl-30b-a3b-thinking",
+    "qwen3-vl-8b-instruct",
+    "qwen3.5-plus-2026-04-20",
+    "qwen3.6-27b",
+    "qwen3.6-max-preview",
+]
+
 # Backward-compatible defaults for callers/tests that pass a single model.
 MODEL_QUALITY = STANDARD_MODELS[0]
 MODEL_FAST    = LIGHT_MODELS[0]
@@ -448,6 +462,55 @@ def is_quota_error(exc: Exception) -> bool:
     return any(m in code or m in message for m in quota_markers)
 
 
+def is_sensitive_content_error(exc: Exception) -> bool:
+    """Best-effort detection for provider content moderation/safety refusals."""
+    status_code = getattr(exc, "status_code", None)
+    code = str(getattr(exc, "code", "") or "").lower()
+    message = str(exc).lower()
+    body = str(getattr(exc, "body", "") or "").lower()
+    combined = " ".join([code, message, body])
+    sensitive_markers = (
+        "sensitive",
+        "content policy",
+        "content_policy",
+        "content-policy",
+        "safety",
+        "safe guard",
+        "safeguard",
+        "moderation",
+        "moderated",
+        "audit",
+        "review failed",
+        "risk content",
+        "risky content",
+        "unsafe",
+        "refuse",
+        "refusal",
+        "rejected by policy",
+        "violat",
+        "prohibited",
+        "not allowed",
+        "inappropriate",
+        "illegal",
+        "敏感",
+        "内容安全",
+        "安全",
+        "审核",
+        "审查",
+        "风控",
+        "违规",
+        "违反",
+        "拒绝",
+        "不合规",
+        "不安全",
+        "禁止",
+        "高风险",
+    )
+    if status_code in (400, 403, 422) and any(m in combined for m in sensitive_markers):
+        return True
+    return any(m in code or m in message or m in body for m in sensitive_markers)
+
+
 def split_chunk_further(chunk: str, max_chars: int = 800) -> list:
     lines = chunk.replace("\r", "\n").split("\n")
     sub_chunks, current = [], ""
@@ -472,6 +535,7 @@ def translate_chunk(
     glossary=None,
     model=MODEL_QUALITY,
     retry_count=0,
+    allow_google_fallback=True,
 ):
     context = ""
     if previous_translation:
@@ -502,7 +566,7 @@ def translate_chunk(
         )
         return response.choices[0].message.content.strip()
     except Exception as exc:
-        if is_quota_error(exc):
+        if is_quota_error(exc) or is_sensitive_content_error(exc) or not allow_google_fallback:
             raise
         if retry_count == 0:
             sub_chunks = split_chunk_further(chunk)
@@ -515,10 +579,11 @@ def translate_chunk(
                                 client, sc, index, total,
                                 previous_translation, glossary,
                                 model=model, retry_count=1,
+                                allow_google_fallback=allow_google_fallback,
                             )
                         )
                     except Exception as exc:
-                        if is_quota_error(exc):
+                        if is_quota_error(exc) or is_sensitive_content_error(exc):
                             raise
                         fallback = translate_by_google_with_glossary(sc, glossary or [])
                         results.append(TranslationText(fallback, used_google=True))
@@ -530,6 +595,40 @@ def translate_chunk(
         if fallback and fallback != chunk:
             return TranslationText(fallback, used_google=True)
         raise
+
+
+def translate_by_google_split_with_glossary(chunk: str, glossary: list) -> TranslationText:
+    results = [
+        translate_by_google_with_glossary(sub_chunk, glossary or [])
+        for sub_chunk in split_chunk_further(chunk)
+    ]
+    return TranslationText("\n".join(results), used_google=True)
+
+
+def run_sensitive_fallback_models(client, chunk, index, total, previous, glossary):
+    last_exc = None
+    for model in SENSITIVE_FALLBACK_MODELS:
+        try:
+            translated = translate_chunk(
+                client, chunk, index, total, previous,
+                glossary=glossary, model=model, allow_google_fallback=False,
+            )
+            return translated, {
+                "sensitiveFallback": True,
+                "fallback": True,
+                "fallbackType": "sensitive_model",
+                "modelOrder": SENSITIVE_FALLBACK_MODELS,
+                "model": model,
+            }
+        except Exception as exc:
+            if is_quota_error(exc) or is_sensitive_content_error(exc):
+                last_exc = exc
+                continue
+            raise
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("敏感内容兼容模型池没有可用模型")
 
 
 # ---------------------------------------------------------------------------
@@ -982,13 +1081,29 @@ class handler(BaseHTTPRequestHandler):
                         "ok": True,
                         "translated": str(translated),
                         "fallback": used_google,
+                        "fallbackType": "google" if used_google else "",
                         "note": "此 chunk 使用了机械翻译" if used_google else "",
                         **meta,
                     })
-                except Exception:
-                    translated = translate_by_google_with_glossary(chunk, glossary or [])
+                except Exception as exc:
+                    if is_sensitive_content_error(exc):
+                        try:
+                            translated, meta = run_sensitive_fallback_models(
+                                client, chunk, index, total, previous, glossary or [],
+                            )
+                            return self._send_json(200, {
+                                "ok": True,
+                                "translated": str(translated),
+                                "note": "此 chunk 已切换敏感内容兼容模型完成翻译",
+                                **meta,
+                            })
+                        except Exception:
+                            pass
+
+                    translated = translate_by_google_split_with_glossary(chunk, glossary or [])
                     return self._send_json(200, {
-                        "ok": True, "translated": translated, "fallback": True,
+                        "ok": True, "translated": str(translated), "fallback": True,
+                        "fallbackType": "google",
                         "note": "此 chunk 使用了机械翻译",
                         "modelOrder": self._ordered_models(tier, model_session_id=model_session_id),
                     })
