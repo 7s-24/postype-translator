@@ -9,6 +9,7 @@ import time
 import plistlib
 import base64
 import io
+import random
 import urllib.parse
 
 from api.db import (
@@ -646,10 +647,19 @@ class handler(BaseHTTPRequestHandler):
             "exhaustedModels": list(tier_state.get("exhaustedModels", [])),
         }
 
-    def _ordered_models(self, tier):
+    def _ordered_models(self, tier, model_session_id=None):
         status = self._current_model_status(tier)
         models = status["models"]
         exhausted = set(status["exhaustedModels"])
+
+        if model_session_id:
+            active = [model for model in models if model not in exhausted]
+            if active:
+                rng = random.Random(f"{tier}:{model_session_id}")
+                rng.shuffle(active)
+                return active
+            return models
+
         start = status["currentIndex"]
         active = [
             models[(start + offset) % len(models)]
@@ -657,6 +667,13 @@ class handler(BaseHTTPRequestHandler):
             if models[(start + offset) % len(models)] not in exhausted
         ]
         return active or models
+
+    def _model_session_id(self, data):
+        value = data.get("modelSessionId") or data.get("model_session_id")
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value[:200] or None
 
     def _mark_model_exhausted(self, tier, model):
         models = self._models_for_tier(tier)
@@ -675,8 +692,8 @@ class handler(BaseHTTPRequestHandler):
             tier_state["currentIndex"] = 0
         self._save_model_state(state)
 
-    def _run_with_model_rotation(self, tier, callback, rotate_on_bad_request=False):
-        models = self._ordered_models(tier)
+    def _run_with_model_rotation(self, tier, callback, rotate_on_bad_request=False, model_session_id=None):
+        models = self._ordered_models(tier, model_session_id=model_session_id)
         first_model = models[0]
         last_exc = None
 
@@ -689,6 +706,7 @@ class handler(BaseHTTPRequestHandler):
                     "model": model,
                     "switchedModel": model != first_model,
                     "currentModel": status["model"],
+                    "modelOrder": models,
                     "exhaustedModels": status["exhaustedModels"],
                 }
             except Exception as exc:
@@ -735,7 +753,10 @@ class handler(BaseHTTPRequestHandler):
             # === MODEL STATUS ===
             if action == "model_status":
                 tier = self._tier_name(data)
+                model_session_id = self._model_session_id(data)
                 status = self._current_model_status(tier)
+                if model_session_id:
+                    status["modelOrder"] = self._ordered_models(tier, model_session_id=model_session_id)
                 return self._send_json(200, {"ok": True, **status})
 
             # === PREPARE ===
@@ -767,6 +788,7 @@ class handler(BaseHTTPRequestHandler):
 
             # === EXTRACT TERMS ===
             if action == "extract_terms":
+                model_session_id = self._model_session_id(data)
                 text = data.get("text", "")
                 if not text:
                     return self._send_json(200, {"ok": True, "terms": []})
@@ -779,6 +801,7 @@ class handler(BaseHTTPRequestHandler):
                 terms, meta = self._run_with_model_rotation(
                     "standard",
                     lambda model: extract_terms(client, text, model=model),
+                    model_session_id=model_session_id,
                 )
                 return self._send_json(200, {"ok": True, "terms": terms, **meta})
 
@@ -803,6 +826,7 @@ class handler(BaseHTTPRequestHandler):
 
             # === TRANSLATE ===
             if action == "translate":
+                model_session_id = self._model_session_id(data)
                 chunk = data.get("chunk", "")
                 index = int(data.get("index", 1))
                 total = int(data.get("total", 1))
@@ -825,6 +849,7 @@ class handler(BaseHTTPRequestHandler):
                             client, chunk, index, total, previous,
                             glossary=glossary, model=model,
                         ),
+                        model_session_id=model_session_id,
                     )
                     return self._send_json(200, {
                         "ok": True, "translated": translated, "fallback": False, **meta,
@@ -835,10 +860,12 @@ class handler(BaseHTTPRequestHandler):
                     return self._send_json(200, {
                         "ok": True, "translated": translated, "fallback": True,
                         "note": "此 chunk 使用了机械翻译",
+                        "modelOrder": self._ordered_models(tier, model_session_id=model_session_id),
                     })
 
             # === FIX ===
             if action == "fix":
+                model_session_id = self._model_session_id(data)
                 translated_text = data.get("translated_text", "")
                 if not translated_text:
                     status, payload = error_response("MISSING_TRANSLATED_TEXT", 400)
@@ -867,12 +894,14 @@ class handler(BaseHTTPRequestHandler):
                             model=model,
                         ),
                         rotate_on_bad_request=True,
+                        model_session_id=model_session_id,
                     )
                 else:
                     fixed, meta = self._run_with_model_rotation(
                         tier,
                         lambda model: fix_korean_text(client, translated_text, model=model),
                         rotate_on_bad_request=True,
+                        model_session_id=model_session_id,
                     )
                 return self._send_json(200, {"ok": True, "fixed_text": fixed, **meta})
 
