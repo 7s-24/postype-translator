@@ -521,7 +521,7 @@
 }
 .snake-stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, 1fr) auto;
   gap: 0;
   margin: 0 0 10px;
   border: 1px solid #ddd;
@@ -542,6 +542,17 @@
 }
 .snake-stats span:last-child { border-right: none; }
 .snake-stats strong { color: #111; }
+.snake-play-area {
+  position: relative;
+  overflow: hidden;
+}
+.snake-close {
+  align-self: stretch;
+  margin-left: -1px;
+  padding: 0 10px;
+  font-size: 11px;
+  line-height: 1;
+}
 .snake-board {
   display: block;
   width: 100%;
@@ -553,9 +564,20 @@
   image-rendering: pixelated;
 }
 .snake-gameover {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
   display: none;
-  margin: 0;
-  padding: 10px;
+  align-items: stretch;
+  justify-content: center;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.96);
+}
+.snake-gameover-panel {
+  width: 100%;
+  min-height: 100%;
+  overflow-y: auto;
+  padding: 12px;
   border: 1px solid #111;
   background: #fafafa;
 }
@@ -617,7 +639,7 @@
   padding: 8px 12px;
   font-size: 12px;
 }
-.snake-gameover.active { display: block; }
+.snake-gameover.active { display: flex; }
 .snake-gameover-title {
   font-size: 12px;
   font-weight: 700;
@@ -674,7 +696,8 @@
   #output { min-height: 360px; }
   .snake-modal { align-items: flex-end; padding: 10px; }
   .snake-box { width: 100%; padding: 10px; }
-  .snake-stats { grid-template-columns: repeat(3, 1fr); }
+  .snake-gameover-panel { padding: 10px; }
+  .snake-stats { grid-template-columns: repeat(3, 1fr) auto; }
   .snake-stats span { padding: 7px 6px; font-size: 10px; }
   .snake-controls { display: grid; }
   .snake-submit-row input[type="text"] { flex: 1 1 120px; }

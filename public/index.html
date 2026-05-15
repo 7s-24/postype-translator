@@ -201,36 +201,41 @@
 
 <div id="snake-modal" class="snake-modal" aria-hidden="true">
   <div class="snake-box" role="dialog" aria-modal="false" aria-label="等待小游戏">
-    <div class="snake-stats" aria-live="polite">
-      <span>得分 <strong id="snake-score">0</strong></span>
-      <span>豆子 <strong id="snake-food-name">术语</strong></span>
-      <span>重试 <strong id="snake-retry-left">1</strong></span>
-    </div>
-    <canvas id="snake-board" class="snake-board" width="360" height="360" aria-label="贪吃蛇游戏区域"></canvas>
-    <div class="snake-controls" aria-label="手机方向键">
-      <button type="button" class="snake-dir" data-dir="up" aria-label="向上">↑</button>
-      <button type="button" class="snake-dir" data-dir="left" aria-label="向左">←</button>
-      <button type="button" class="snake-dir" data-dir="down" aria-label="向下">↓</button>
-      <button type="button" class="snake-dir" data-dir="right" aria-label="向右">→</button>
-    </div>
-    <div id="snake-gameover" class="snake-gameover" aria-live="polite">
-      <div class="snake-gameover-title">撞墙了……</div>
-      <p id="snake-rank-note">输入名字后记录本局成绩；名字会保存在本机，下次自动填入。</p>
-      <div class="snake-submit-row">
-        <input id="snake-player-name" type="text" maxlength="16" placeholder="你的名字" autocomplete="nickname" />
-        <label class="snake-submit-remote">
-          <input id="snake-submit-global" type="checkbox" />
-          <span>同步到总榜</span>
-        </label>
-        <button id="snake-submit-score" type="button">记录成绩</button>
+    <div class="snake-play-area">
+      <div class="snake-stats" aria-live="polite">
+        <span>得分 <strong id="snake-score">0</strong></span>
+        <span>豆子 <strong id="snake-food-name">术语</strong></span>
+        <span>重试 <strong id="snake-retry-left">1</strong></span>
+        <button id="snake-close" class="snake-close secondary" type="button" aria-label="关闭小游戏">关闭</button>
       </div>
-      <div class="snake-actions">
-        <button id="snake-retry" type="button">重试一次</button>
-        <button id="snake-hide" class="secondary" type="button">继续等待</button>
+      <canvas id="snake-board" class="snake-board" width="360" height="360" aria-label="贪吃蛇游戏区域"></canvas>
+      <div class="snake-controls" aria-label="手机方向键">
+        <button type="button" class="snake-dir" data-dir="up" aria-label="向上">↑</button>
+        <button type="button" class="snake-dir" data-dir="left" aria-label="向左">←</button>
+        <button type="button" class="snake-dir" data-dir="down" aria-label="向下">↓</button>
+        <button type="button" class="snake-dir" data-dir="right" aria-label="向右">→</button>
       </div>
-      <div class="snake-rank">
-        <div class="snake-rank-title">排行榜</div>
-        <ol id="snake-leaderboard" class="snake-leaderboard"></ol>
+      <div id="snake-gameover" class="snake-gameover" aria-live="polite">
+        <div class="snake-gameover-panel">
+          <div class="snake-gameover-title">撞墙了……</div>
+          <p id="snake-rank-note">输入名字后记录本局成绩；名字会保存在本机，下次自动填入。</p>
+          <div class="snake-submit-row">
+            <input id="snake-player-name" type="text" maxlength="16" placeholder="你的名字" autocomplete="nickname" />
+            <label class="snake-submit-remote">
+              <input id="snake-submit-global" type="checkbox" />
+              <span>同步到总榜</span>
+            </label>
+            <button id="snake-submit-score" type="button">记录成绩</button>
+          </div>
+          <div class="snake-actions">
+            <button id="snake-retry" type="button">重试一次</button>
+            <button id="snake-hide" class="secondary" type="button">继续等待</button>
+          </div>
+          <div class="snake-rank">
+            <div class="snake-rank-title">排行榜</div>
+            <ol id="snake-leaderboard" class="snake-leaderboard"></ol>
+          </div>
+        </div>
       </div>
     </div>
   </div>

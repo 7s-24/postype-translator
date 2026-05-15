@@ -1284,6 +1284,7 @@ function setSnakeDirection(next) {
 }
 
 function bindSnakeEvents() {
+  $("snake-close").addEventListener("click", () => closeSnakeGame());
   $("snake-hide").addEventListener("click", () => closeSnakeGame());
   $("snake-submit-score").addEventListener("click", () => {
     recordSnakeScore();
