@@ -1214,23 +1214,38 @@ class handler(BaseHTTPRequestHandler):
                     status, payload = error_response("MISSING_API_KEY", 500)
                     return self._send_json(status, payload)
                 # Term extraction is a quality-sensitive one-shot step, so use
-                # the standard model pool with quota-aware rotation. If provider
-                # errors still prevent extraction, try the compatible fallback
-                # pool before degrading to an empty term list.
+                # the standard model pool with quota-aware rotation first. If a
+                # standard model refuses the candidate-word prompt as sensitive,
+                # immediately retry the same extraction with the sensitive-content
+                # compatible pool before degrading to an empty term list.
+                standard_model_order = self._ordered_models(
+                    "standard", model_session_id=model_session_id,
+                )
                 try:
                     terms, meta = self._run_with_model_rotation(
                         "standard",
                         lambda model: extract_terms(client, text, model=model),
                         model_session_id=model_session_id,
                     )
-                except Exception:
+                except Exception as exc:
                     try:
                         terms, meta = run_sensitive_model_rotation(
                             lambda model: extract_terms(client, text, model=model)
                         )
+                        meta["primaryModelOrder"] = standard_model_order
+                        meta["termExtractionFallbackReason"] = (
+                            "sensitive_content"
+                            if is_sensitive_content_error(exc) else
+                            "provider_error"
+                        )
                     except Exception:
                         terms, meta = [], {
-                            "modelOrder": self._ordered_models("standard", model_session_id=model_session_id),
+                            "modelOrder": standard_model_order,
+                            "termExtractionFallbackReason": (
+                                "sensitive_content_failed"
+                                if is_sensitive_content_error(exc) else
+                                "provider_error_failed"
+                            ),
                         }
                 return self._send_json(200, {"ok": True, "terms": terms, **meta})
 

@@ -993,10 +993,13 @@ async function prepareAndExtract(options = {}) {
     await endProcessingWakeLock();
 
     showTermsReview(getGlossary(), articleTerms);
+    const fallbackNotice = ext.sensitiveFallback
+      ? "标准模型触发内容安全限制，已切换敏感内容兼容模型提取术语。\n"
+      : "";
     showNotice(
-      articleTerms.length
+      fallbackNotice + (articleTerms.length
         ? `从原文中提取了 ${articleTerms.length} 条术语（共 ${chunks.length} 段），请确认后开始翻译。`
-        : `未检测到新术语（共 ${chunks.length} 段），将使用全局术语库。请确认后开始翻译。`
+        : `未检测到新术语（共 ${chunks.length} 段），将使用全局术语库。请确认后开始翻译。`)
     );
   } catch (err) {
     showError(err);
