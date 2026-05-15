@@ -51,7 +51,7 @@
           <button type="button" class="secondary" onclick="exportGlossary()">导出</button>
           <button type="button" class="secondary" onclick="$('import-file').click()">导入</button>
           <button type="button" class="secondary" onclick="resetGlossary()">恢复当前预设</button>
-          <button type="button" class="secondary" id="btn-submit-glossary" onclick="submitGlossaryUpload('global')">提交术语库</button>
+          <button type="button" class="secondary" id="btn-submit-glossary" onclick="submitGlossaryUpload('global')">提交我的术语库</button>
         </div>
         <div class="g-table-wrap">
           <table class="g-table">
@@ -114,9 +114,8 @@
       </div>
       <div style="margin-top:8px">
         <button type="button" onclick="addTermRow()" style="padding:6px 12px;font-size:12px">+ 添加术语</button>
-        <button type="button" class="secondary" onclick="exportArticleTerms()" style="padding:6px 12px;font-size:12px">导出篇章术语</button>
-        <button type="button" class="secondary" onclick="exportMergedTerms()" style="padding:6px 12px;font-size:12px">导出本次术语</button>
-        <button type="button" class="secondary" id="btn-submit-terms" onclick="submitGlossaryUpload('article')" style="padding:6px 12px;font-size:12px">提交篇章术语</button>
+        <button type="button" class="secondary" onclick="exportMergedTerms()" style="padding:6px 12px;font-size:12px">导出</button>
+        <!-- <button type="button" class="secondary" id="btn-submit-terms" onclick="submitGlossaryUpload('article')" style="padding:6px 12px;font-size:12px">提交篇章术语</button> -->
       </div>
       <div class="terms-actions">
         <button type="button" id="btn-confirm-translate">确认并翻译</button>
