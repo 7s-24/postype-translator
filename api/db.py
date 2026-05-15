@@ -7,6 +7,7 @@ The translator remains usable without MongoDB. Callers should catch
 
 from datetime import datetime, timezone
 import importlib
+import importlib.util
 import os
 from urllib.parse import urlparse
 
