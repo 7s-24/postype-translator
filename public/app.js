@@ -811,6 +811,119 @@ function safeHttpUrl(value) {
   }
 }
 
+function countGlossaryCategories(glossary) {
+  const counts = {};
+
+  for (const item of glossary) {
+    const category = CATEGORIES.includes(item?.category) ? item.category : "其他";
+    counts[category] = (counts[category] || 0) + 1;
+  }
+
+  return counts;
+}
+
+function mapGlossaryByKorean(glossary) {
+  const map = new Map();
+
+  for (const item of glossary || []) {
+    if (!item || typeof item.ko !== "string" || typeof item.zh !== "string") continue;
+
+    const ko = item.ko.trim();
+    const zh = item.zh.trim();
+    if (!ko || !zh) continue;
+
+    map.set(ko, {
+      zh,
+      category: CATEGORIES.includes(item.category) ? item.category : "其他",
+    });
+  }
+
+  return map;
+}
+
+function getPresetModificationStats(currentGlossary, baselineGlossary) {
+  const current = mapGlossaryByKorean(currentGlossary);
+  const baseline = mapGlossaryByKorean(baselineGlossary);
+  let addedTermCount = 0;
+  let deletedTermCount = 0;
+  let editedTermCount = 0;
+
+  for (const [ko, currentTerm] of current.entries()) {
+    const baselineTerm = baseline.get(ko);
+    if (!baselineTerm) {
+      addedTermCount += 1;
+    } else if (baselineTerm.zh !== currentTerm.zh || baselineTerm.category !== currentTerm.category) {
+      editedTermCount += 1;
+    }
+  }
+
+  for (const ko of baseline.keys()) {
+    if (!current.has(ko)) {
+      deletedTermCount += 1;
+    }
+  }
+
+  const modifiedTermCount = addedTermCount + deletedTermCount + editedTermCount;
+
+  return {
+    presetModified: modifiedTermCount > 0,
+    modifiedTermCount,
+    addedTermCount,
+    deletedTermCount,
+    editedTermCount,
+  };
+}
+
+function getGlossaryUsageMode(glossary) {
+  const hasArticleTerms = glossary.some(item => item?._src === "article");
+  const hasGlobalTerms = glossary.some(item => item?._src === "global" || !item?._src);
+
+  if (hasArticleTerms && hasGlobalTerms) return "mixed";
+  if (hasArticleTerms) return "article";
+  return getGlossaryMode();
+}
+
+function buildGlossaryUsageStats(glossary, clean, extra = {}) {
+  const mode = getGlossaryUsageMode(glossary);
+  const presetId = currentGlossaryPreset || "";
+  const presetStats = presetId
+    ? getPresetModificationStats(getGlossary(), defaultGlossary)
+    : {
+        presetModified: false,
+        modifiedTermCount: 0,
+        addedTermCount: 0,
+        deletedTermCount: 0,
+        editedTermCount: 0,
+      };
+
+  return {
+    userId: getOrCreateGlossarySubmitterId(),
+    pageUrl: safeHttpUrl(window.location.origin) || "https://postype-translator.local",
+    source: "web",
+    glossaryMode: mode,
+    presetId,
+    usedPresetGlossary: Boolean(presetId),
+    termCount: clean.length,
+    categoryCounts: countGlossaryCategories(clean),
+    ...presetStats,
+    ...extra,
+  };
+}
+
+async function trackGlossaryUsageEvent(eventType, stats) {
+  try {
+    await postJSON({
+      action: "track_event",
+      payload: {
+        eventType,
+        ...stats,
+      },
+    });
+  } catch (err) {
+    console.info("track_event failed", err);
+  }
+}
+
 function getGlossarySubmitEntries(scope) {
   if (scope === "article") {
     const articleTerms = mergedGlossary.filter(t => t._src === "article");
@@ -1000,6 +1113,13 @@ async function translateWithGlossary(glossary) {
   const clean = glossary
     .filter(g => g.ko && g.zh)
     .map(g => ({ ko:g.ko, zh:g.zh, category:g.category }));
+  const startedAt = Date.now();
+  const usageStats = buildGlossaryUsageStats(glossary, clean, {
+    tier: fast ? "light" : "standard",
+    chunkCount: total,
+  });
+
+  void trackGlossaryUsageEvent("glossary_translate_started", usageStats);
 
   try {
     setProgress("准备翻译", 0, total);
@@ -1124,7 +1244,18 @@ async function translateWithGlossary(glossary) {
           : "已完成译文问题复核，请检查术语和人称是否符合原文。"
       );
     }
+
+    void trackGlossaryUsageEvent("glossary_translate_completed", {
+      ...usageStats,
+      durationMs: Date.now() - startedAt,
+      ok: true,
+    });
   } catch (err) {
+    void trackGlossaryUsageEvent("glossary_translate_failed", {
+      ...usageStats,
+      durationMs: Date.now() - startedAt,
+      ok: false,
+    });
     showError(err);
     $("progress-label").textContent = "失败";
   } finally {
