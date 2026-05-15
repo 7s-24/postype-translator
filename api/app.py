@@ -405,7 +405,7 @@ KOREAN_PARTICLE_SUFFIXES = (
     "도", "만", "로", "야", "아", "여",
 )
 
-TERM_CANDIDATE_LIMIT = 80
+TERM_CANDIDATE_LIMIT = 20
 
 
 def sample_text(text: str, max_chars: int = 10000) -> str:
