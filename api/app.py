@@ -61,6 +61,7 @@ LIGHT_MODELS = [
     "qwen-flash-2025-07-28",
     "qwen3-0.6b",
     "qwen3-8b",
+    "qwen-mt-lite",
     "qwen3.6-flash-2026-04-16",
     "qwen3.6-flash",
     "qwen3.5-flash-2026-02-23",
@@ -70,7 +71,6 @@ LIGHT_MODELS = [
 SENSITIVE_FALLBACK_MODELS = [
     "qwen-mt-flash",
     "qwen-mt-turbo",
-    "qwen-mt-lite",
     "qwen-turbo",
     "qwen-flash",
     "qwen-vl-max",
