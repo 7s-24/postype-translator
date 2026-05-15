@@ -190,6 +190,8 @@ function setBusy(busy) {
   $("btn-translate").disabled = busy;
   $("btn-direct-translate").disabled = busy;
   $("btn-download").disabled = busy;
+  if ($("btn-submit-glossary")) $("btn-submit-glossary").disabled = busy;
+  if ($("btn-submit-terms")) $("btn-submit-terms").disabled = busy;
   $("file-html").disabled = busy;
   $("manual-html").disabled = busy;
   $("url").disabled = busy;
@@ -698,6 +700,86 @@ function exportMergedTerms() {
   downloadJSON(clean, "merged-terms.json");
 }
 
+function getOrCreateGlossarySubmitterId() {
+  const key = "postype_glossary_submitter_id";
+  let id = localStorage.getItem(key);
+
+  if (!id) {
+    id = window.crypto && typeof window.crypto.randomUUID === "function"
+      ? window.crypto.randomUUID()
+      : `user-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(key, id);
+  }
+
+  return id;
+}
+
+function safeHttpUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  try {
+    const url = new URL(raw);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function getGlossarySubmitEntries(scope) {
+  if (scope === "article") {
+    const articleTerms = mergedGlossary.filter(t => t._src === "article");
+    const preferred = articleTerms.length ? articleTerms : mergedGlossary;
+    return cleanGlossaryForExport(preferred);
+  }
+
+  return cleanGlossaryForExport(getGlossary());
+}
+
+async function submitGlossaryUpload(scope = "global") {
+  const entries = getGlossarySubmitEntries(scope);
+  const label = scope === "article" ? "篇章术语" : "当前术语库";
+  const btn = scope === "article" ? $("btn-submit-terms") : $("btn-submit-glossary");
+
+  if (!entries.length) {
+    showError(`没有可提交的${label}。请先填写韩文和中文。`);
+    return;
+  }
+
+  const notes = prompt(`准备提交 ${entries.length} 条${label}术语。`, "");
+  if (notes === null) return;
+
+  clearError();
+  if (btn) btn.disabled = true;
+
+  try {
+    const sourceUrl = safeHttpUrl($("url")?.value) || safeHttpUrl(window.location.href);
+    const data = await postJSON({
+      action: "save_glossary_upload",
+      payload: {
+        userId: getOrCreateGlossarySubmitterId(),
+        sourceUrl,
+        sourceTitle: document.title || "韩文同人翻译器",
+        locale: "ko-zh-CN",
+        notes: String(notes || "").trim() || `${label}提交`,
+        entries,
+      },
+    });
+
+    const saved = data?.data?.entryCount || entries.length;
+    showNotice(`已提交 ${saved} 条${label}，即将进入审核，谢谢你的帮助！`);
+  } catch (err) {
+    const apiError = getApiError(err);
+    if (apiError?.code === "DATABASE_NOT_CONFIGURED") {
+      showError("术语库提交暂时不可用。 ");
+    } else {
+      showError(err);
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function showTermsReview(global, article) {
   const seen = new Set();
   mergedGlossary = [];
@@ -1072,7 +1154,7 @@ $("help-modal").addEventListener("click", e => {
 const SITE_LIKE_KEY = "postype_site_liked";
 
 async function loadSiteLikeCount() {
-  // 用一个固定的 pageUrl 代表整个网站
+  // 用 delta=0 读取或初始化固定页面的 kudos 计数，不计入新的点赞。
   try {
     const data = await postJSON({
       action: "record_like",
@@ -1080,12 +1162,13 @@ async function loadSiteLikeCount() {
         pageUrl: window.location.origin || "https://postype-translator.local",
         pageTitle: "韩文同人翻译器",
         source: "load",
-        delta: 0,   // 0 不计入，但代码里会被强制改成 1
+        delta: 0,
       },
     });
-    // 注意：因为 delta=0 被强制改成 1，这里其实会 +1
-    // 我们改用另一种方式：只在用户首次点击时才发请求
-    console.debug("site like loaded", data);
+    const count = data?.data?.likeCount;
+    if (typeof count === "number") {
+      $("like-count").textContent = count;
+    }
   } catch (err) {
     console.warn("site like load failed", err);
   }
@@ -1144,3 +1227,4 @@ if (localStorage.getItem(SITE_LIKE_KEY) === "1") {
 // ── Init ─────────────────────────────────────────────────
 updateGlossaryModeLabel();
 loadGlossaryPresets();
+loadSiteLikeCount();

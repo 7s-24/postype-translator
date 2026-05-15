@@ -468,3 +468,56 @@
       width: 16px;
       height: 16px;
     }
+
+    /* ---- AO3-style kudos ---- */
+    .like-float {
+      position: fixed;
+      right: 72px;
+      bottom: 24px;
+      z-index: 1000;
+      display: inline-flex;
+      align-items: baseline;
+      gap: 5px;
+      width: auto;
+      height: auto;
+      padding: 4px 0;
+      border: 0;
+      background: transparent;
+      color: #555;
+      box-shadow: none;
+      font: inherit;
+      font-size: 12px;
+      line-height: 1.2;
+      letter-spacing: normal;
+      text-transform: none;
+    }
+    .like-float:hover:not(:disabled) {
+      background: transparent;
+      color: #111;
+      text-decoration: underline;
+    }
+    .like-float:disabled {
+      border: 0;
+      background: transparent;
+      color: #999;
+    }
+    .like-icon {
+      color: #777;
+      font-size: 12px;
+    }
+    .like-icon.liked {
+      color: #900;
+    }
+    .like-count {
+      font-variant-numeric: tabular-nums;
+      color: #777;
+    }
+    @media (max-width: 520px) {
+      .like-float {
+        right: 66px;
+        bottom: 26px;
+      }
+      .like-label {
+        display: none;
+      }
+    }
