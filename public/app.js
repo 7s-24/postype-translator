@@ -746,7 +746,7 @@ async function submitGlossaryUpload(scope = "global") {
     return;
   }
 
-  const notes = prompt(`准备提交 ${entries.length} 条${label}，会保存到 MongoDB 供之后整理预设术语库。可以留备注，也可以直接确定。`, "");
+  const notes = prompt(`准备提交 ${entries.length} 条${label}术语。`, "");
   if (notes === null) return;
 
   clearError();
@@ -767,11 +767,11 @@ async function submitGlossaryUpload(scope = "global") {
     });
 
     const saved = data?.data?.entryCount || entries.length;
-    showNotice(`已提交 ${saved} 条${label}，谢谢补充！`);
+    showNotice(`已提交 ${saved} 条${label}，即将进入审核，谢谢你的帮助！`);
   } catch (err) {
     const apiError = getApiError(err);
     if (apiError?.code === "DATABASE_NOT_CONFIGURED") {
-      showError("术语库提交暂时不可用：MongoDB 未配置。可以先导出 JSON 保存。 ");
+      showError("术语库提交暂时不可用。 ");
     } else {
       showError(err);
     }
