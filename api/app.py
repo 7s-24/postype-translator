@@ -174,6 +174,7 @@ EXTRACT_TERMS_PROMPT = """你是专业韩文小说高频实词术语翻译器。
 3. 必须过滤掉没有术语价值的连接词、助词残片、语尾残片、代词、泛用副词、泛用动词/形容词、数字量词、普通寒暄和过于日常的词。
 4. 如果某个候选词看起来像被韩文助词或语尾粘连了，请在 ko 字段中使用更干净的原形/词干，并给出自然的简体中文译法。
 5. 不确定是否有意义时，宁可过滤掉。
+6. 标注为【引号内出现】的词条，是原文用「」『』《》【】[] 等成对引号特意框住的内容，大概率是专有名词/技能/作品/物品/组织，请优先保留并翻译；只有在明显是普通台词强调或语气词时才过滤。
 
 输出要求：
 - 只输出 JSON 数组，不要任何其他文字、markdown 标记或代码块符号
@@ -320,6 +321,71 @@ def split_text(text: str, max_chars: int = MAX_CHARS):
 
 KOREAN_CONTENT_TOKEN_RE = re.compile(r"[가-힣]{2,}")
 
+# 韩文小说常用的成对引号/括号。每对 (左, 右) 都会被用于抽取内部内容。
+QUOTED_TERM_DELIMITERS = (
+    ("「", "」"),
+    ("『", "』"),
+    ("《", "》"),
+    ("〈", "〉"),
+    ("【", "】"),
+    ("［", "］"),
+    ("[", "]"),
+    ("\u201c", "\u201d"),   # “”
+    ("\u2018", "\u2019"),   # ‘’
+)
+
+# 内部必须至少含一个韩文字符，才算韩文术语候选；
+# 允许内部混入数字/汉字/空格，但整体长度有上限，避免把一整句台词当术语。
+QUOTED_TERM_MAX_INNER_LEN = 20
+QUOTED_TERM_HAS_KOREAN_RE = re.compile(r"[가-힣]")
+QUOTED_TERM_SENTENCE_PUNCT = "。！？.!?…"
+
+# 构造一个总的正则：匹配任意一种成对引号内的内容（非贪婪，不跨行）
+_QUOTED_TERM_PATTERN = "|".join(
+    f"{re.escape(l)}([^{re.escape(l)}{re.escape(r)}\\n]{{1,{QUOTED_TERM_MAX_INNER_LEN}}}?){re.escape(r)}"
+    for l, r in QUOTED_TERM_DELIMITERS
+)
+QUOTED_TERM_RE = re.compile(_QUOTED_TERM_PATTERN)
+
+
+def extract_quoted_terms(text: str) -> list:
+    """从成对引号/括号中抽取候选术语。
+
+    返回 [(token, count), ...]，按出现次数和首次出现顺序排序。
+    引号内的内容至少要包含一个韩文字符；会自动去除首尾空白；
+    会跳过明显是整句台词的内容（带句末标点或过长）。
+    """
+    if not text:
+        return []
+
+    counts = {}
+    first_seen = {}
+    order = 0
+
+    for match in QUOTED_TERM_RE.finditer(text):
+        inner = next((g for g in match.groups() if g is not None), None)
+        if not inner:
+            continue
+        token = inner.strip()
+        if len(token) < 2:
+            continue
+        # 必须含韩文；纯数字、纯英文、纯标点都跳过
+        if not QUOTED_TERM_HAS_KOREAN_RE.search(token):
+            continue
+        # 整句话过滤：包含句末标点的，大概率是台词不是术语
+        if any(ch in token for ch in QUOTED_TERM_SENTENCE_PUNCT):
+            continue
+        counts[token] = counts.get(token, 0) + 1
+        if token not in first_seen:
+            first_seen[token] = order
+            order += 1
+
+    return sorted(
+        counts.items(),
+        key=lambda item: (-item[1], -len(item[0]), first_seen[item[0]]),
+    )
+
+
 KOREAN_STOPWORDS = {
     "그리고", "그러나", "하지만", "그래서", "그러면", "그러니까", "그런데", "그러다",
     "이렇게", "그렇게", "저렇게", "어떻게", "이제", "다시", "이미", "아직", "바로",
@@ -371,6 +437,11 @@ def normalize_korean_content_token(token: str) -> str:
 
 
 def extract_frequent_content_words(text: str, limit: int = TERM_CANDIDATE_LIMIT) -> list:
+    # ---- 引号术语：即使只出现一次也保留 ----
+    quoted = extract_quoted_terms(text or "")
+    quoted_tokens = {token for token, _ in quoted}
+
+    # ---- 原有的频率统计 ----
     counts = {}
     first_seen = {}
     order = 0
@@ -383,7 +454,7 @@ def extract_frequent_content_words(text: str, limit: int = TERM_CANDIDATE_LIMIT)
             first_seen[token] = order
             order += 1
 
-    if not counts:
+    if not counts and not quoted:
         return []
 
     min_count = 3 if len(text or "") >= 5000 else 2
@@ -392,11 +463,28 @@ def extract_frequent_content_words(text: str, limit: int = TERM_CANDIDATE_LIMIT)
         candidates = [(token, count) for token, count in counts.items() if count >= 2]
 
     candidates.sort(key=lambda item: (-item[1], -len(item[0]), first_seen[item[0]]))
-    return candidates[:limit]
+
+    # ---- 合并：引号术语优先放在前面，避免被 limit 截掉 ----
+    merged = list(quoted)
+    seen = set(quoted_tokens)
+    for token, count in candidates:
+        if token in seen:
+            continue
+        merged.append((token, count))
+        seen.add(token)
+
+    return merged[:limit]
 
 
 def build_term_translation_prompt(text: str, candidates: list) -> str:
-    candidate_lines = [f"- {token}（出现 {count} 次）" for token, count in candidates]
+    quoted_tokens = {token for token, _ in extract_quoted_terms(text or "")}
+    candidate_lines = []
+    for token, count in candidates:
+        if token in quoted_tokens:
+            suffix = "（引号内出现，大概率是专有术语）"
+        else:
+            suffix = f"（出现 {count} 次）"
+        candidate_lines.append(f"- {token}{suffix}")
     sampled = sample_text(text, max_chars=6000)
     return (
         "【候选高频词】\n"
