@@ -121,7 +121,7 @@ function setGlossaryMode(mode) {
 function updateGlossaryModeLabel() {
   const title = $("glossary-title");
   if (!title) return;
-  title.textContent = getGlossaryMode() === "user" ? "用户术语库" : "预设术语库";
+  title.textContent = getGlossaryMode() === "user" ? "我的术语库" : "预设术语库";
 }
 
 function dedupeGlossaryPreferLast(arr) {
@@ -458,7 +458,7 @@ async function loadGlossaryPresets() {
 
       if (
         getGlossaryMode() === "user" &&
-        !confirm("当前正在使用用户术语库。切换预设会覆盖当前术语库。建议先导出备份。是否继续？")
+        !confirm("当前正在使用你的术语库。切换预设会覆盖当前术语库。建议先导出备份。是否继续？")
       ) {
         select.value = currentGlossaryPreset;
         return;
@@ -576,7 +576,7 @@ $("import-file").addEventListener("change", async e => {
 
     saveGlossary(merged, { switchToUser: true });
     renderGlossaryTable();
-    showNotice(`已导入 ${imported.length} 条术语，并切换到用户术语库。重复术语已按导入列表最后一项为准。`);
+    showNotice(`已导入 ${imported.length} 条术语，并切换到个人术语库。重复术语已按导入列表最后一项为准。`);
   } catch(err) {
     showError("导入失败：" + err.message);
   }
@@ -738,7 +738,7 @@ function getGlossarySubmitEntries(scope) {
 
 async function submitGlossaryUpload(scope = "global") {
   const entries = getGlossarySubmitEntries(scope);
-  const label = scope === "article" ? "篇章术语" : "用户术语";
+  const label = scope === "article" ? "篇章术语" : "个人术语";
   const btn = scope === "article" ? $("btn-submit-terms") : $("btn-submit-glossary");
 
   if (!entries.length) {
