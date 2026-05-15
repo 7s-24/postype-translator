@@ -30,7 +30,7 @@
       color: #111;
       margin: 0 0 8px;
     }
-    input[type="url"], textarea {
+    input[type="url"], input[type="text"], textarea {
       width: 100%;
       padding: 12px 14px;
       font: inherit;
@@ -43,7 +43,7 @@
       -webkit-appearance: none;
       appearance: none;
     }
-    input[type="url"]:focus, textarea:focus {
+    input[type="url"]:focus, input[type="text"]:focus, textarea:focus {
       outline: 2px solid #111;
       outline-offset: -2px;
     }
@@ -424,8 +424,39 @@
       font-size: 16px;
       font-weight: 700;
     }
+    .help-tabs {
+      display: flex;
+      gap: 14px;
+      margin: 0 0 14px;
+      border-bottom: 1px solid #ddd;
+    }
+    .help-tab {
+      appearance: none;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      background: none;
+      padding: 0 0 8px;
+      color: #777;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .help-tab.active {
+      border-bottom-color: #111;
+      color: #111;
+    }
+    .help-tab-panel {
+      display: none;
+    }
+    .help-tab-panel.active {
+      display: block;
+    }
+    .help-tab-panel .help-section:first-child {
+      margin-top: 0;
+    }
     .help-section {
-      margin: 16px 0 0;
+      margin: 14px 0 0;
     }
     .help-section-title {
       margin: 0 0 8px;
@@ -454,6 +485,28 @@
       padding-top: 12px;
       border-top: 1px solid #ddd;
       font-size: 13px;
+    }
+    .glossary-submit-box {
+      left: 50%;
+      right: auto;
+      top: 50%;
+      bottom: auto;
+      transform: translate(-50%, -50%);
+    }
+    .glossary-submit-summary {
+      margin: 0 0 14px;
+      color: #444;
+    }
+    .compact-field {
+      margin-bottom: 14px;
+    }
+    .glossary-submit-actions {
+      display: flex;
+      gap: 0;
+      margin-top: 16px;
+    }
+    .glossary-submit-actions button {
+      flex: 1 1 0;
     }
     .help-close {
       margin-top: 14px;

@@ -51,7 +51,7 @@
           <button type="button" class="secondary" onclick="exportGlossary()">导出</button>
           <button type="button" class="secondary" onclick="$('import-file').click()">导入</button>
           <button type="button" class="secondary" onclick="resetGlossary()">恢复当前预设</button>
-          <button type="button" class="secondary" id="btn-submit-glossary" onclick="submitGlossaryUpload('global')">提交术语库</button>
+          <button type="button" class="secondary" id="btn-submit-glossary" onclick="submitGlossaryUpload('global')">提交我的术语库</button>
         </div>
         <div class="g-table-wrap">
           <table class="g-table">
@@ -114,9 +114,8 @@
       </div>
       <div style="margin-top:8px">
         <button type="button" onclick="addTermRow()" style="padding:6px 12px;font-size:12px">+ 添加术语</button>
-        <button type="button" class="secondary" onclick="exportArticleTerms()" style="padding:6px 12px;font-size:12px">导出篇章术语</button>
-        <button type="button" class="secondary" onclick="exportMergedTerms()" style="padding:6px 12px;font-size:12px">导出本次术语</button>
-        <button type="button" class="secondary" id="btn-submit-terms" onclick="submitGlossaryUpload('article')" style="padding:6px 12px;font-size:12px">提交篇章术语</button>
+        <button type="button" class="secondary" onclick="exportMergedTerms()" style="padding:6px 12px;font-size:12px">导出</button>
+        <!-- <button type="button" class="secondary" id="btn-submit-terms" onclick="submitGlossaryUpload('article')" style="padding:6px 12px;font-size:12px">提交篇章术语</button> -->
       </div>
       <div class="terms-actions">
         <button type="button" id="btn-confirm-translate">确认并翻译</button>
@@ -140,6 +139,32 @@
   </div>
 <button id="help-open" class="help-float" type="button">?</button>
 
+<div id="glossary-submit-modal" class="help-modal" aria-hidden="true">
+  <form id="glossary-submit-form" class="help-box glossary-submit-box" role="dialog" aria-modal="true" aria-labelledby="glossary-submit-title">
+    <h2 id="glossary-submit-title" class="help-title">提交术语库</h2>
+    <p class="glossary-submit-summary">准备提交 <strong id="glossary-submit-count">0 条术语</strong>，审核通过后会加入公共预设哦！</p>
+
+    <div class="field compact-field">
+      <label for="glossary-submit-nickname">你的昵称</label>
+      <input id="glossary-submit-nickname" type="text" maxlength="80" placeholder="下次提交会自动填入" autocomplete="nickname" />
+    </div>
+
+    <div class="field compact-field">
+      <label for="glossary-submit-notes">备注</label>
+      <input id="glossary-submit-notes" type="text" maxlength="300" placeholder="术语库的名字或者用途～" autocomplete="off" />
+    </div>
+
+    <!-- <div class="help-section help-note">
+      昵称只会保存在本浏览器的 localStorage 里，提交时一起发送，方便审核时知道如何称呼你。
+    </div> -->
+
+    <div class="glossary-submit-actions">
+      <button id="glossary-submit-confirm" type="submit">提交</button>
+      <button id="glossary-submit-cancel" class="secondary" type="button">取消</button>
+    </div>
+  </form>
+</div>
+
 <div id="fast-help-modal" class="help-modal">
   <div class="help-box small-help-box">
     <div class="help-section" style="margin:0;">
@@ -154,33 +179,47 @@
 
 <div id="help-modal" class="help-modal">
   <div class="help-box">
-    <h2 class="help-title">使用方法</h2>
+    <h2 class="help-title">帮助</h2>
 
-    <div class="help-section">
-      <p>把 Postype 韩文小说正文翻译成简体中文的工具。</p>
-      <p>是朕执意要看的，要罚就罚朕吧！</p>
+    <div class="help-tabs" role="tablist" aria-label="帮助内容">
+      <button class="help-tab active" type="button" data-help-tab="usage" role="tab" aria-selected="true">使用说明</button>
+      <button class="help-tab" type="button" data-help-tab="changelog" role="tab" aria-selected="false">更新日志</button>
     </div>
 
-    <div class="help-section">
-      <div class="help-section-title">输入方式</div>
-      <ol class="help-list">
-        <li>输入 Postype 页面 URL</li>
-        <li>手动复制粘贴韩文正文</li>
-        <li>上传 .html 或 .webarchive 文件</li>
-      </ol>
+    <div id="help-usage-panel" class="help-tab-panel active" role="tabpanel">
+      <div class="help-section">
+        <p>把 Postype 韩文小说正文翻译成简体中文的工具。</p>
+        <p>是朕执意要看的，要罚就罚朕吧！</p>
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-title">输入方式</div>
+        <ol class="help-list">
+          <li>输入 Postype 页面 URL</li>
+          <li>手动复制粘贴韩文正文</li>
+          <li>上传 .html 或 .webarchive 文件</li>
+        </ol>
+      </div>
+
+      <div class="help-section help-note">
+        付费和受限内容不支持 URL 输入，需要手动复制粘贴文本，或者上传文件。
+      </div>
+
+      <div class="help-section">
+        <div class="help-section-title">注意事项</div>
+        <ul class="help-list">
+          <li>URL和上传的部分只适配Postype。</li>
+          <li>.webarchive 文件会解析主资源中的 HTML 内容。但因为文件一般太大，所以基本是摆设状态。</li>
+          <li>翻译质量和速度会受到不同因素的影响。如果翻译不理想，建议朴素地重试一次。</li>
+        </ul>
+      </div>
     </div>
 
-    <div class="help-section help-note">
-      付费和受限内容不支持 URL 输入，需要手动复制粘贴文本，或者上传文件。
-    </div>
-
-    <div class="help-section">
-      <div class="help-section-title">注意事项</div>
-      <ul class="help-list">
-        <li>URL和上传的部分只适配Postype。</li>
-        <li>.webarchive 文件会解析主资源中的 HTML 内容。但因为文件一般太大，所以基本是摆设状态。</li>
-        <li>翻译质量和速度会受到不同因素的影响。如果翻译不理想，建议朴素地重试一次。</li>
-      </ul>
+    <div id="help-changelog-panel" class="help-tab-panel" role="tabpanel">
+      <div class="help-section">
+        <div class="help-section-title">2026-05-15</div>
+        <p>更新了提交术语库的功能。现在开始可以贡献自己创建的用户术语库了。</p>
+      </div>
     </div>
 
     <div class="help-meta">
