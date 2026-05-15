@@ -271,6 +271,78 @@ async function postJSON(body) {
   return data;
 }
 
+async function postJSONStream(body, onDelta) {
+  const res = await fetch("/api/translate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, stream: true }),
+  });
+
+  if (!res.ok || !res.body) {
+    const data = await res.json().catch(() => ({}));
+    throw makeApiError(data.error, `HTTP_${res.status}`, `Request failed (HTTP ${res.status})`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let currentEvent = "message";
+  let currentData = [];
+  let donePayload = null;
+
+  const dispatchEvent = () => {
+    if (!currentData.length) {
+      currentEvent = "message";
+      return;
+    }
+
+    const raw = currentData.join("\n");
+    const payload = raw ? JSON.parse(raw) : {};
+
+    if (currentEvent === "delta") {
+      onDelta(payload.delta || "");
+    } else if (currentEvent === "done") {
+      donePayload = payload;
+    } else if (currentEvent === "error") {
+      throw makeApiError(payload.error, "STREAM_ERROR", "Streaming request failed");
+    }
+
+    currentEvent = "message";
+    currentData = [];
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line) {
+        dispatchEvent();
+      } else if (line.startsWith("event:")) {
+        currentEvent = line.slice(6).trim() || "message";
+      } else if (line.startsWith("data:")) {
+        currentData.push(line.slice(5).replace(/^ /, ""));
+      }
+    }
+
+    if (done) break;
+  }
+
+  if (buffer) {
+    if (buffer.startsWith("data:")) currentData.push(buffer.slice(5).replace(/^ /, ""));
+    else if (buffer.startsWith("event:")) currentEvent = buffer.slice(6).trim() || "message";
+  }
+  dispatchEvent();
+
+  if (!donePayload || donePayload.ok === false || donePayload.error) {
+    throw makeApiError(donePayload?.error, "STREAM_ERROR", "Streaming request failed");
+  }
+
+  return donePayload;
+}
+
 function catOptions(sel) {
   return CATEGORIES.map(c => `<option value="${c}"${c===sel?" selected":""}>${c}</option>`).join("");
 }
@@ -1071,7 +1143,8 @@ async function translateWithGlossary(glossary) {
         const prev = i > 0 ? parts[i - 1] : "";
         setProgress(`翻译第 ${i + 1}/${total} 段`, i, total);
 
-        const data = await postJSON({
+        parts[i] = "";
+        const data = await postJSONStream({
           action: "translate",
           chunk: chunks[i],
           index: i + 1,
@@ -1080,9 +1153,12 @@ async function translateWithGlossary(glossary) {
           glossary: clean,
           fast: false,
           modelSessionId: currentModelSessionId,
+        }, (delta) => {
+          parts[i] += delta;
+          $("output").value = parts.filter(Boolean).join("\n\n");
         });
 
-        parts[i] = data.translated || "";
+        parts[i] = data.translated || parts[i];
         if (data.fallback) {
           fallbackList.push(i + 1);
           if (data.fallbackType === "sensitive_model") {

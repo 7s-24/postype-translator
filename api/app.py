@@ -604,6 +604,10 @@ class TranslationText(str):
         return obj
 
 
+class StreamingTranslationInterrupted(Exception):
+    """Raised when a streaming provider call fails after tokens reached client."""
+
+
 def translate_by_google(text: str) -> str:
     try:
         url = "https://translate.googleapis.com/translate_a/single"
@@ -787,6 +791,63 @@ def translate_chunk(
         if fallback and fallback != chunk:
             return TranslationText(fallback, used_google=True)
         raise
+
+
+def build_translation_user_prompt(chunk, index, total, previous_translation="", glossary=None):
+    context = ""
+    if previous_translation:
+        context = (
+            "【上一段译文结尾，仅用于保持上下文一致，不要重复翻译】\n"
+            f"{previous_translation[-2000:]}\n\n"
+        )
+
+    glossary_section = build_glossary_prompt_section(glossary, chunk=chunk) if glossary else ""
+    if glossary_section:
+        glossary_section += "\n\n"
+
+    return (
+        f"{context}{glossary_section}"
+        f"下面是韩文小说正文的第 {index}/{total} 段。\n\n"
+        "请直接翻译成简体中文。注意承接上一段的人物称呼、语气、情绪和文风，"
+        "但不要重复上一段内容。\n"
+        "特别注意保持术语和专有名词的翻译一致性，"
+        "如果术语表中有对应条目，必须使用术语表中的译法。\n\n"
+        f"【当前原文】\n{chunk}\n"
+    )
+
+
+def translate_chunk_stream(
+    client, chunk, index, total,
+    previous_translation="",
+    glossary=None,
+    model=MODEL_QUALITY,
+    on_delta=None,
+):
+    """Translate a chunk through DashScope's OpenAI-compatible streaming API."""
+    user_prompt = build_translation_user_prompt(
+        chunk, index, total, previous_translation, glossary,
+    )
+    response = client.chat.completions.create(
+        model=model,
+        messages=build_chat_messages(SYSTEM_PROMPT, user_prompt, model),
+        temperature=0.2,
+        stream=True,
+    )
+
+    parts = []
+    for event in response:
+        choices = getattr(event, "choices", None) or []
+        if not choices:
+            continue
+        delta = getattr(choices[0], "delta", None)
+        content = getattr(delta, "content", None) if delta else None
+        if not content:
+            continue
+        parts.append(content)
+        if on_delta:
+            on_delta(content)
+
+    return TranslationText("".join(parts).strip())
 
 
 def translate_by_google_split_with_glossary(chunk: str, glossary: list) -> TranslationText:
@@ -1046,6 +1107,24 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
+    def _send_sse_headers(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def _send_sse_event(self, event, data):
+        payload = json.dumps(data, ensure_ascii=False)
+        self.wfile.write(f"event: {event}\n".encode("utf-8"))
+        for line in payload.splitlines() or [""]:
+            self.wfile.write(f"data: {line}\n".encode("utf-8"))
+        self.wfile.write(b"\n")
+        self.wfile.flush()
+
     def do_GET(self):
         self._send_json(200, {"ok": True, "message": "Postype translator API is running."})
 
@@ -1194,6 +1273,129 @@ class handler(BaseHTTPRequestHandler):
             raise last_exc
         raise RuntimeError("没有可用模型")
 
+    def _stream_with_model_rotation(
+        self,
+        tier,
+        client,
+        chunk,
+        index,
+        total,
+        previous,
+        glossary,
+        model_session_id=None,
+    ):
+        models = self._ordered_models(tier, model_session_id=model_session_id)
+        first_model = models[0]
+        last_exc = None
+
+        for model in models:
+            sent_any = False
+
+            def on_delta(delta):
+                nonlocal sent_any
+                sent_any = True
+                self._send_sse_event("delta", {"delta": delta})
+
+            try:
+                translated = translate_chunk_stream(
+                    client, chunk, index, total, previous,
+                    glossary=glossary, model=model, on_delta=on_delta,
+                )
+                status = self._current_model_status(tier)
+                return translated, {
+                    "tier": tier,
+                    "model": model,
+                    "switchedModel": model != first_model,
+                    "currentModel": status["model"],
+                    "modelOrder": models,
+                    "exhaustedModels": status["exhaustedModels"],
+                }
+            except Exception as exc:
+                if sent_any:
+                    raise StreamingTranslationInterrupted(str(exc)) from exc
+                if is_quota_error(exc):
+                    last_exc = exc
+                    self._mark_model_exhausted(tier, model)
+                    continue
+                last_exc = exc
+                raise
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("没有可用模型")
+
+    def _handle_translate_stream(self, data):
+        model_session_id = self._model_session_id(data)
+        chunk = data.get("chunk", "")
+        index = int(data.get("index", 1))
+        total = int(data.get("total", 1))
+        previous = data.get("previous", "")
+        glossary = data.get("glossary", [])
+        tier = self._tier_name(data)
+
+        if not chunk:
+            status, payload = error_response("MISSING_CHUNK", 400)
+            return self._send_json(status, payload)
+
+        client = self._get_client()
+        if not client:
+            status, payload = error_response("MISSING_API_KEY", 500)
+            return self._send_json(status, payload)
+
+        self._send_sse_headers()
+        self._send_sse_event("meta", {
+            "ok": True,
+            "status": "started",
+            "index": index,
+            "total": total,
+            "modelOrder": self._ordered_models(tier, model_session_id=model_session_id),
+        })
+
+        try:
+            translated, meta = self._stream_with_model_rotation(
+                tier, client, chunk, index, total, previous, glossary,
+                model_session_id=model_session_id,
+            )
+            self._send_sse_event("done", {
+                "ok": True,
+                "translated": str(translated),
+                "fallback": False,
+                "fallbackType": "",
+                **meta,
+            })
+        except StreamingTranslationInterrupted as exc:
+            self._send_sse_event("error", {
+                "error": {
+                    "code": "STREAM_INTERRUPTED",
+                    "message": friendly_provider_error(exc),
+                    "action": ERROR_ACTION,
+                }
+            })
+        except Exception:
+            try:
+                translated, meta = run_sensitive_fallback_models(
+                    client, chunk, index, total, previous, glossary or [],
+                )
+                self._send_sse_event("delta", {"delta": str(translated)})
+                self._send_sse_event("done", {
+                    "ok": True,
+                    "translated": str(translated),
+                    "note": "此 chunk 已切换兼容模型完成翻译",
+                    **meta,
+                })
+            except Exception:
+                translated = translate_by_google_split_with_glossary(chunk, glossary or [])
+                self._send_sse_event("delta", {"delta": str(translated)})
+                self._send_sse_event("done", {
+                    "ok": True,
+                    "translated": str(translated),
+                    "fallback": True,
+                    "fallbackType": "google",
+                    "note": "此 chunk 使用了机械翻译",
+                    "modelOrder": self._ordered_models(tier, model_session_id=model_session_id),
+                })
+        return None
+
     def _pick_model(self, data):
         return self._current_model_status(self._tier_name(data))["model"]
 
@@ -1290,6 +1492,9 @@ class handler(BaseHTTPRequestHandler):
 
             # === TRANSLATE ===
             if action == "translate":
+                if data.get("stream"):
+                    return self._handle_translate_stream(data)
+
                 model_session_id = self._model_session_id(data)
                 chunk = data.get("chunk", "")
                 index = int(data.get("index", 1))
