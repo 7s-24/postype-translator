@@ -186,7 +186,7 @@ function setBusy(busy) {
   $("manual-html").disabled = busy;
   $("url").disabled = busy;
   $("fast-mode").disabled = busy;
-  $("btn-translate").textContent = busy ? "处理中…" : "翻译";
+  $("btn-translate").textContent = busy ? "处理中…" : "重新提取术语";
 }
 
 function readFile(file) {
