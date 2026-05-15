@@ -738,7 +738,7 @@ function getGlossarySubmitEntries(scope) {
 
 async function submitGlossaryUpload(scope = "global") {
   const entries = getGlossarySubmitEntries(scope);
-  const label = scope === "article" ? "篇章术语" : "当前术语库";
+  const label = scope === "article" ? "篇章术语" : "用户术语";
   const btn = scope === "article" ? $("btn-submit-terms") : $("btn-submit-glossary");
 
   if (!entries.length) {
@@ -746,7 +746,7 @@ async function submitGlossaryUpload(scope = "global") {
     return;
   }
 
-  const notes = prompt(`准备提交用户术语库中的 ${entries.length} 条${label}术语，给你的术语库起个名字，或者留下一些对审核有帮助的话吧：`, "");
+  const notes = prompt(`准备提交 ${entries.length} 条${label}，给你的术语库起个名字，或者留下一些对审核有帮助的话吧：`, "");
   if (notes === null) return;
 
   clearError();
