@@ -38,7 +38,7 @@ function scheduleToastAutoHide() {
     clearNotice();
   }, 5200);
 }
-const API_ERROR_ACTION = "Please copy the error code and describe what happened to fedrick1plela755@gmail.com";
+const API_ERROR_ACTION = "如错误反复产生，请描述错误产生时的情况，并将错误码反馈至fedrick1plela755@gmail.com";
 
 function getApiError(err) {
   if (err && typeof err === "object") {
