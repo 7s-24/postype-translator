@@ -598,9 +598,15 @@ def translate_by_google_split_with_glossary(chunk: str, glossary: list) -> Trans
     return TranslationText("\n".join(results), used_google=True)
 
 
+def randomized_sensitive_fallback_models():
+    """Return a fresh random polling order for sensitive-content fallbacks."""
+    return random.sample(SENSITIVE_FALLBACK_MODELS, k=len(SENSITIVE_FALLBACK_MODELS))
+
+
 def run_sensitive_fallback_models(client, chunk, index, total, previous, glossary):
     last_exc = None
-    for model in SENSITIVE_FALLBACK_MODELS:
+    model_order = randomized_sensitive_fallback_models()
+    for model in model_order:
         try:
             translated = translate_chunk(
                 client, chunk, index, total, previous,
@@ -610,7 +616,7 @@ def run_sensitive_fallback_models(client, chunk, index, total, previous, glossar
                 "sensitiveFallback": True,
                 "fallback": True,
                 "fallbackType": "sensitive_model",
-                "modelOrder": SENSITIVE_FALLBACK_MODELS,
+                "modelOrder": model_order,
                 "model": model,
             }
         except Exception as exc:
