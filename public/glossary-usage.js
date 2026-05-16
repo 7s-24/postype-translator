@@ -97,9 +97,6 @@ function buildGlossaryUsageStats(glossary, clean, extra = {}) {
   };
 }
 
-// 埋点是 fire-and-forget：所有调用方都用 void 包装，不会阻塞翻译主流程。
-// 这里 try/catch 只是为了避免 unhandled promise rejection；
-// DATABASE_NOT_CONFIGURED 在开发环境是预期状态，静默处理，避免 console 噪音。
 async function trackGlossaryUsageEvent(eventType, stats) {
   try {
     await postJSON({
