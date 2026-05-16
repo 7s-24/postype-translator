@@ -664,6 +664,14 @@ class StreamingTranslationInterrupted(Exception):
     """Raised when a streaming provider call fails after tokens reached client."""
 
 
+class StreamingClientGoneError(Exception):
+    """Raised when the client closed the SSE connection (page unloaded, etc.)."""
+
+
+class StreamingTimeoutError(Exception):
+    """Raised when streaming has no token for too long; treat as soft failure."""
+
+
 def translate_by_google(text: str) -> str:
     try:
         url = "https://translate.googleapis.com/translate_a/single"
@@ -856,6 +864,11 @@ def translate_chunk(
         raise
 
 
+STREAM_FIRST_TOKEN_TIMEOUT_SEC = 25.0   # 首个 token 必须在 25s 内到达
+STREAM_INTER_TOKEN_TIMEOUT_SEC = 20.0   # 相邻两个 token 之间的最大间隔
+STREAM_TOTAL_TIMEOUT_SEC = 90.0         # 单次流式翻译的硬上限
+
+
 def translate_chunk_stream(
     client, chunk, index, total,
     previous_translation="",
@@ -863,7 +876,13 @@ def translate_chunk_stream(
     model=MODEL_QUALITY,
     on_delta=None,
 ):
-    """Translate a chunk through DashScope's OpenAI-compatible streaming API."""
+    """Translate a chunk through DashScope's OpenAI-compatible streaming API.
+
+    使用三层超时保护，避免某个模型卡死把整个 SSE 请求拖垮：
+    - 首 token 超时：模型 thinking 太久或直接卡住时尽早放弃
+    - token 间隔超时：模型中途断流时尽早放弃
+    - 整体超时：再慢的模型也不能拖累整个 chunk
+    """
     if is_qwen_mt_model(model):
         mt_kwargs = build_qwen_mt_request(chunk, glossary=glossary)
         response = client.chat.completions.create(
@@ -883,17 +902,50 @@ def translate_chunk_stream(
         )
 
     parts = []
-    for event in response:
-        choices = getattr(event, "choices", None) or []
-        if not choices:
-            continue
-        delta = getattr(choices[0], "delta", None)
-        content = getattr(delta, "content", None) if delta else None
-        if not content:
-            continue
-        parts.append(content)
-        if on_delta:
-            on_delta(content)
+    started_at = time.monotonic()
+    last_token_at = started_at
+    got_first_token = False
+
+    try:
+        for event in response:
+            now = time.monotonic()
+
+            # 整体超时
+            if now - started_at > STREAM_TOTAL_TIMEOUT_SEC:
+                raise StreamingTimeoutError(
+                    f"stream total timeout >{STREAM_TOTAL_TIMEOUT_SEC}s on {model}"
+                )
+            # 首 token 超时
+            if not got_first_token and now - started_at > STREAM_FIRST_TOKEN_TIMEOUT_SEC:
+                raise StreamingTimeoutError(
+                    f"first token timeout >{STREAM_FIRST_TOKEN_TIMEOUT_SEC}s on {model}"
+                )
+            # token 间隔超时
+            if got_first_token and now - last_token_at > STREAM_INTER_TOKEN_TIMEOUT_SEC:
+                raise StreamingTimeoutError(
+                    f"inter-token timeout >{STREAM_INTER_TOKEN_TIMEOUT_SEC}s on {model}"
+                )
+
+            choices = getattr(event, "choices", None) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            content = getattr(delta, "content", None) if delta else None
+            if not content:
+                continue
+            parts.append(content)
+            got_first_token = True
+            last_token_at = now
+            if on_delta:
+                on_delta(content)
+    finally:
+        # 主动尝试关闭底层 SSE 连接，避免连接半挂占用资源
+        close = getattr(response, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
     return TranslationText("".join(parts).strip())
 
@@ -1156,12 +1208,20 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _send_sse_event(self, event, data):
-        payload = json.dumps(data, ensure_ascii=False)
-        self.wfile.write(f"event: {event}\n".encode("utf-8"))
-        for line in payload.splitlines() or [""]:
-            self.wfile.write(f"data: {line}\n".encode("utf-8"))
-        self.wfile.write(b"\n")
-        self.wfile.flush()
+        # 关键：data 字段值里如果包含 \n，按 SSE 规范要拆成多行 `data:` 但前端
+        # 解析时如果遇到部分接收边界容易出错。改成 ensure_ascii=False + 无缩进，
+        # 然后把所有控制换行转义掉，保证一条事件永远只占一行 data。
+        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        # 把真实换行符替换成转义形式，确保 SSE 一行 data 完整。
+        # 前端 JSON.parse 时 \n 会被还原成换行符。
+        payload = payload.replace("\r", "").replace("\n", "\\n")
+        try:
+            self.wfile.write(f"event: {event}\n".encode("utf-8"))
+            self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # 客户端已经关闭连接（关页面、刷新等），不再写
+            raise StreamingClientGoneError("client disconnected")
 
     def do_GET(self):
         self._send_json(200, {"ok": True, "message": "Postype translator API is running."})
@@ -1364,6 +1424,9 @@ class handler(BaseHTTPRequestHandler):
                     "exhaustedModels": status["exhaustedModels"],
                     "interruptionRetries": interruption_retries,
                 }
+            except StreamingClientGoneError:
+                # 客户端已经走了，没必要继续翻译
+                raise
             except Exception as exc:
                 last_exc = exc
 
@@ -1371,17 +1434,22 @@ class handler(BaseHTTPRequestHandler):
                     # 已经向前端发过 delta：通知客户端丢弃当前 chunk 的累积，
                     # 然后切下一个模型从头重试。
                     if interruption_retries >= self.STREAM_INTERRUPTION_MAX_RETRIES:
-                        # 已经重试到上限，放弃流式、让外层走 sensitive/google 兜底。
                         raise StreamingTranslationInterrupted(str(exc)) from exc
 
                     interruption_retries += 1
-                    self._send_sse_event("restart", {
-                        "reason": "stream_interrupted",
-                        "message": friendly_provider_error(exc),
-                        "failedModel": model,
-                        "attempt": interruption_retries,
-                        "maxAttempts": self.STREAM_INTERRUPTION_MAX_RETRIES,
-                    })
+                    try:
+                        self._send_sse_event("restart", {
+                            "reason": "stream_interrupted",
+                            "message": friendly_provider_error(exc),
+                            "failedModel": model,
+                            "attempt": interruption_retries,
+                            "maxAttempts": self.STREAM_INTERRUPTION_MAX_RETRIES,
+                            # 诊断信息：异常类型 + 异常字符串（便于线上排查）
+                            "errorType": type(exc).__name__,
+                            "errorDetail": str(exc)[:300],
+                        })
+                    except StreamingClientGoneError:
+                        raise
                     # 配额错误顺便标记耗尽，下次轮换跳过
                     if is_quota_error(exc):
                         self._mark_model_exhausted(tier, model)
@@ -1395,8 +1463,6 @@ class handler(BaseHTTPRequestHandler):
 
         # 所有模型都试过仍然失败
         if last_exc:
-            # 若最后一次是中断且尚未达到 raise StreamingTranslationInterrupted 的分支，
-            # 包装一下让外层 _handle_translate_stream 走兜底路径
             if interruption_retries > 0:
                 raise StreamingTranslationInterrupted(str(last_exc)) from last_exc
             raise last_exc
@@ -1441,6 +1507,9 @@ class handler(BaseHTTPRequestHandler):
                 "fallbackType": "",
                 **meta,
             })
+        except StreamingClientGoneError:
+            # 客户端已经断开（关闭页面、刷新等），不再写任何事件。
+            return None
         except StreamingTranslationInterrupted as exc:
             # 流式翻译在多次切换模型后仍然中断。先通知前端清空累积，
             # 然后落到敏感兜底 / Google 兜底，让客户端最终拿到一段完整结果。
