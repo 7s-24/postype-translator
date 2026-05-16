@@ -928,7 +928,7 @@ function getGlossarySubmitEntries(scope) {
 
 async function submitGlossaryUpload(scope = "global") {
   if (scope === "global" && getGlossaryMode() !== "user") {
-    showError("只有我的术语库可以分享。请先添加、编辑或导入术语，切换到个人术语库后再分享。");
+    showError("只有我的术语库可以分享。请先添加、编辑或导入术语哦！");
     updateGlossaryModeLabel();
     return;
   }
