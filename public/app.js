@@ -40,21 +40,17 @@ const PROGRESS_TRACE_LIMIT = 12;
 function resetProgressTrace() {
   progressTraceStartedAt = performance.now();
   progressTraceLines = [];
-  const el = $("progress-detail");
-  if (el) el.textContent = "";
 }
 
 function appendProgressTrace(message) {
-  const el = $("progress-detail");
-  if (!el) return;
-
   if (!progressTraceStartedAt) progressTraceStartedAt = performance.now();
   const elapsed = ((performance.now() - progressTraceStartedAt) / 1000).toFixed(1).padStart(5, " ");
-  progressTraceLines.push(`[+${elapsed}s] ${message}`);
+  const line = `[+${elapsed}s] ${message}`;
+  progressTraceLines.push(line);
   if (progressTraceLines.length > PROGRESS_TRACE_LIMIT) {
     progressTraceLines = progressTraceLines.slice(-PROGRESS_TRACE_LIMIT);
   }
-  el.textContent = progressTraceLines.join("\n");
+  console.info("[progress trace]", line);
 }
 function scheduleToastAutoHide() {
   clearTimeout(toastTimer);
@@ -1179,12 +1175,11 @@ async function translateWithGlossary(glossary, options = {}) {
 
   const logTranslationStep = (message) => {
     appendProgressTrace(message);
-    console.info("[translation progress]", message);
   };
   const makeStreamDebug = (chunkNumber) => (event) => {
     const message = `第 ${chunkNumber}/${total} 段：${event.message}`;
     appendProgressTrace(message);
-    console.info("[translation stream]", { chunk: chunkNumber, total, ...event });
+    console.debug("[translation stream]", { chunk: chunkNumber, total, ...event });
   };
 
   void trackGlossaryUsageEvent("glossary_translate_started", usageStats);
