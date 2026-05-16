@@ -624,6 +624,11 @@ class TranslationText(str):
 class StreamingTranslationInterrupted(Exception):
     """Raised when a streaming provider call fails after tokens reached client."""
 
+    def __init__(self, message="", partial_translation="", remaining_chunk=""):
+        super().__init__(message)
+        self.partial_translation = partial_translation
+        self.remaining_chunk = remaining_chunk
+
 
 class StreamingClientGoneError(Exception):
     """Raised when the client closed the SSE connection (page unloaded, etc.)."""
@@ -642,7 +647,59 @@ class StreamingDeadlineExceeded(Exception):
     """
 
 
-def translate_by_google(text: str, deadline=None) -> str:
+
+
+def split_paragraph_blocks(text: str) -> list:
+    """Return non-empty paragraph blocks while tolerating single/blank newlines."""
+    text = (text or "").replace("\r\n", "\n").strip()
+    if not text:
+        return []
+    blocks = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    if len(blocks) == 1 and "\n" in text:
+        line_blocks = [part.strip() for part in text.split("\n") if part.strip()]
+        if len(line_blocks) > 1:
+            return line_blocks
+    return blocks
+
+
+def join_translation_parts(*parts: str) -> str:
+    clean = [str(part).strip() for part in parts if str(part or "").strip()]
+    return "\n\n".join(clean)
+
+
+def infer_stream_resume_state(source_text: str, streamed_text: str):
+    """Infer completed source paragraphs from partial streamed translation.
+
+    The streamed answer can be cut mid-paragraph when the provider connection
+    dies.  Blank paragraphs are ignored for counting, and the final non-empty
+    output paragraph is treated as incomplete: it is dropped and translated
+    again from the matching source paragraph.
+    """
+    source_paras = split_paragraph_blocks(source_text)
+    output_paras = split_paragraph_blocks(streamed_text)
+    if len(source_paras) <= 1 or len(output_paras) <= 1:
+        return None
+
+    # The last non-empty streamed paragraph may have been cut off mid-sentence
+    # when the stream died, so never count it as completed.  Empty paragraphs are
+    # already ignored by split_paragraph_blocks and do not affect the resume
+    # point.
+    completed = max(0, min(len(output_paras) - 1, len(source_paras)))
+    if completed <= 0:
+        return None
+
+    kept_text = "\n\n".join(output_paras[:completed]).strip()
+    remaining_chunk = "\n\n".join(source_paras[completed:]).strip()
+    return {
+        "completedParagraphs": completed,
+        "sourceParagraphs": len(source_paras),
+        "outputParagraphs": len(output_paras),
+        "droppedOutputParagraphs": len(output_paras) - completed,
+        "keptText": kept_text,
+        "remainingChunk": remaining_chunk,
+    }
+
+def translate_by_google(text: str) -> str:
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {"client": "gtx", "sl": "ko", "tl": "zh-CN", "dt": "t", "q": text[:5000]}
@@ -1529,37 +1586,43 @@ class handler(BaseHTTPRequestHandler):
         last_exc = None
         interruption_retries = 0  # 中断后切模型重试的累计次数
         any_tokens_sent = False    # 跨重试累计：是否曾向客户端发送过 delta
+        completed_translation = ""
+        active_chunk = chunk
+        active_previous = previous
+        resume_count = 0
 
         for model in models:
-            # Deadline 守门：每次进入新模型前都检查一次。如果在重试过程中已经
-            # 向前端 push 过 delta，按"中断"语义抛 StreamingTranslationInterrupted
-            # 让 SSE 处理器发 restart + 进入 sensitive/google 兜底；否则按未发
-            # 任何内容抛 StreamingDeadlineExceeded 直接走兜底。
+            # Deadline 守门：每次进入新模型前都检查一次。如果已经保留了部分
+            # 段落，则把剩余原文交给兜底链，而不是整段清空重来。
             if deadline_exceeded(deadline):
                 if any_tokens_sent or interruption_retries > 0:
                     raise StreamingTranslationInterrupted(
-                        f"handler deadline exceeded after {interruption_retries} retries"
+                        f"handler deadline exceeded after {interruption_retries} retries",
+                        partial_translation=completed_translation,
+                        remaining_chunk=active_chunk,
                     )
                 if last_exc is not None:
                     raise last_exc
                 raise StreamingDeadlineExceeded("handler deadline exceeded before any output")
 
             sent_any = False
+            sent_parts = []
 
             def on_delta(delta):
                 nonlocal sent_any, any_tokens_sent
                 sent_any = True
                 any_tokens_sent = True
+                sent_parts.append(delta)
                 self._send_sse_event("delta", {"delta": delta})
 
             try:
                 translated = translate_chunk_stream(
-                    client, chunk, index, total, previous,
+                    client, active_chunk, index, total, active_previous,
                     glossary=glossary, model=model, on_delta=on_delta,
                     deadline=deadline,
                 )
                 status = self._current_model_status(tier)
-                return translated, {
+                return join_translation_parts(completed_translation, str(translated)), {
                     "tier": tier,
                     "model": model,
                     "switchedModel": model != first_model,
@@ -1567,6 +1630,7 @@ class handler(BaseHTTPRequestHandler):
                     "modelOrder": models,
                     "exhaustedModels": status["exhaustedModels"],
                     "interruptionRetries": interruption_retries,
+                    "streamResumeCount": resume_count,
                 }
             except StreamingClientGoneError:
                 raise
@@ -1575,21 +1639,69 @@ class handler(BaseHTTPRequestHandler):
 
                 if sent_any:
                     if interruption_retries >= self.STREAM_INTERRUPTION_MAX_RETRIES:
-                        raise StreamingTranslationInterrupted(str(exc)) from exc
+                        raise StreamingTranslationInterrupted(
+                            str(exc),
+                            partial_translation=completed_translation,
+                            remaining_chunk=active_chunk,
+                        ) from exc
 
                     interruption_retries += 1
-                    try:
-                        self._send_sse_event("restart", {
-                            "reason": "stream_interrupted",
-                            "message": friendly_provider_error(exc),
-                            "failedModel": model,
-                            "attempt": interruption_retries,
-                            "maxAttempts": self.STREAM_INTERRUPTION_MAX_RETRIES,
-                            "errorType": type(exc).__name__,
-                            "errorDetail": str(exc)[:300],
-                        })
-                    except StreamingClientGoneError:
-                        raise
+                    streamed_text = "".join(sent_parts)
+                    resume_state = infer_stream_resume_state(active_chunk, streamed_text)
+
+                    if resume_state:
+                        completed_translation = join_translation_parts(
+                            completed_translation,
+                            resume_state["keptText"],
+                        )
+                        active_chunk = resume_state["remainingChunk"]
+                        active_previous = join_translation_parts(previous, completed_translation)
+                        resume_count += 1
+                        try:
+                            self._send_sse_event("replace", {
+                                "reason": "stream_resume",
+                                "text": completed_translation,
+                                "message": "流式中断，已删除最后未完成段落，并按非空段落数从该段重新续译",
+                                "failedModel": model,
+                                "attempt": interruption_retries,
+                                "maxAttempts": self.STREAM_INTERRUPTION_MAX_RETRIES,
+                                "completedParagraphs": resume_state["completedParagraphs"],
+                                "sourceParagraphs": resume_state["sourceParagraphs"],
+                                "outputParagraphs": resume_state["outputParagraphs"],
+                                "droppedOutputParagraphs": resume_state["droppedOutputParagraphs"],
+                                "errorType": type(exc).__name__,
+                                "errorDetail": str(exc)[:300],
+                            })
+                        except StreamingClientGoneError:
+                            raise
+                        if not active_chunk:
+                            status = self._current_model_status(tier)
+                            return completed_translation, {
+                                "tier": tier,
+                                "model": model,
+                                "switchedModel": model != first_model,
+                                "currentModel": status["model"],
+                                "modelOrder": models,
+                                "exhaustedModels": status["exhaustedModels"],
+                                "interruptionRetries": interruption_retries,
+                                "streamResumeCount": resume_count,
+                                "streamCompletedAfterInterrupt": True,
+                            }
+                    else:
+                        try:
+                            self._send_sse_event("replace", {
+                                "reason": "stream_interrupted",
+                                "text": completed_translation,
+                                "message": friendly_provider_error(exc),
+                                "failedModel": model,
+                                "attempt": interruption_retries,
+                                "maxAttempts": self.STREAM_INTERRUPTION_MAX_RETRIES,
+                                "errorType": type(exc).__name__,
+                                "errorDetail": str(exc)[:300],
+                            })
+                        except StreamingClientGoneError:
+                            raise
+
                     # 配额错误顺便标记耗尽，下次轮换跳过
                     if is_quota_error(exc):
                         self._mark_model_exhausted(tier, model)
@@ -1604,20 +1716,27 @@ class handler(BaseHTTPRequestHandler):
         # 所有模型都试过仍然失败
         if last_exc:
             if any_tokens_sent or interruption_retries > 0:
-                raise StreamingTranslationInterrupted(str(last_exc)) from last_exc
+                raise StreamingTranslationInterrupted(
+                    str(last_exc),
+                    partial_translation=completed_translation,
+                    remaining_chunk=active_chunk,
+                ) from last_exc
             raise last_exc
         raise RuntimeError("没有可用模型")
 
-    def _send_stream_fallback_result(self, translated, *, note, tier, model_session_id, meta=None):
+    def _send_stream_fallback_result(self, translated, *, note, tier, model_session_id, meta=None, prefix=""):
         """Emit the final delta + done events after stream phase gave up.
 
         Shared by the various exception branches in ``_handle_translate_stream``
         so the SSE shape stays consistent.
         """
-        self._send_sse_event("delta", {"delta": str(translated)})
+        translated = str(translated)
+        final_text = join_translation_parts(prefix, translated)
+        if translated:
+            self._send_sse_event("delta", {"delta": translated})
         done_payload = {
             "ok": True,
-            "translated": str(translated),
+            "translated": final_text,
             "note": note,
         }
         if meta:
@@ -1633,7 +1752,7 @@ class handler(BaseHTTPRequestHandler):
     def _stream_fallback_chain(
         self,
         client, chunk, index, total, previous, glossary,
-        tier, model_session_id, overall_deadline,
+        tier, model_session_id, overall_deadline, prefix="",
     ):
         """Run sensitive-model fallback then google fallback within budget.
 
@@ -1663,6 +1782,7 @@ class handler(BaseHTTPRequestHandler):
                         tier=tier,
                         model_session_id=model_session_id,
                         meta=meta,
+                        prefix=prefix,
                     )
                     return
                 except Exception:
@@ -1676,6 +1796,7 @@ class handler(BaseHTTPRequestHandler):
             tier=tier,
             model_session_id=model_session_id,
             meta=None,  # default → fallback=True, fallbackType=google
+            prefix=prefix,
         )
 
     def _handle_translate_stream(self, data):
@@ -1731,18 +1852,29 @@ class handler(BaseHTTPRequestHandler):
             return None
         except StreamingTranslationInterrupted as exc:
             # 流式翻译在多次切换模型后仍然中断（或 deadline 触发但已发过 delta）。
-            # 先通知前端清空累积，然后跑兜底链。
+            # 如果前面已经按段落保留了部分译文，只兜底剩余原文；否则清空当前累积后兜底整段。
+            prefix = getattr(exc, "partial_translation", "") or ""
+            remaining_chunk = getattr(exc, "remaining_chunk", "") or chunk
             try:
-                self._send_sse_event("restart", {
+                self._send_sse_event("replace", {
                     "reason": "stream_exhausted",
+                    "text": prefix,
                     "message": friendly_provider_error(exc),
                 })
             except StreamingClientGoneError:
                 return None
             try:
                 self._stream_fallback_chain(
-                    client, chunk, index, total, previous, glossary,
-                    tier, model_session_id, overall_deadline,
+                    client,
+                    remaining_chunk,
+                    index,
+                    total,
+                    join_translation_parts(previous, prefix),
+                    glossary,
+                    tier,
+                    model_session_id,
+                    overall_deadline,
+                    prefix=prefix,
                 )
             except StreamingClientGoneError:
                 return None

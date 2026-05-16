@@ -240,7 +240,7 @@ async function postJSON(body, options = {}) {
 }
 
 async function postJSONStream(body, onDelta, callbacks = {}) {
-  const { onRestart, onMeta, onDebug, signal } = callbacks;
+  const { onRestart, onReplace, onMeta, onDebug, signal } = callbacks;
   const debug = (message, extra = {}) => {
     if (typeof onDebug === "function") onDebug({ message, ...extra });
   };
@@ -338,6 +338,13 @@ async function postJSONStream(body, onDelta, callbacks = {}) {
       });
       // 后端在流式翻译中断、切换模型重试前发送，要求前端丢弃当前 chunk 的累积。
       if (typeof onRestart === "function") onRestart(payload);
+    } else if (currentEvent === "replace") {
+      readPhase = "等待续译后的译文";
+      debug(`后端保留部分译文并续译：${payload.reason || "replace"}`, {
+        phase: "replace",
+        payload,
+      });
+      if (typeof onReplace === "function") onReplace(payload);
     } else if (currentEvent === "meta") {
       readPhase = "等待首段译文";
       debug("收到流式 meta，开始等待译文", { phase: "meta", payload });
@@ -1297,6 +1304,35 @@ async function translateWithGlossary(glossary, options = {}) {
               const maxAttempts = payload?.maxAttempts;
               if (attempt && maxAttempts) {
                 setProgress(`翻译第 ${i + 1}/${total} 段（重试 ${attempt}/${maxAttempts}）`, i, total);
+              }
+            },
+            // 后端可以根据已输出的段落数保留确认完成的译文，并从下一段原文续译。
+            onReplace: (payload) => {
+              if (!isCurrentRun(runId)) return;
+              const replacementText = payload?.text || "";
+              parts[i] = replacementText ? `${replacementText}\n\n` : "";
+              $("output").value = parts.filter(Boolean).join("\n\n");
+              interruptedChunks.add(i + 1);
+              console.warn("[stream replace]", {
+                chunk: i + 1,
+                attempt: payload?.attempt,
+                maxAttempts: payload?.maxAttempts,
+                failedModel: payload?.failedModel,
+                completedParagraphs: payload?.completedParagraphs,
+                sourceParagraphs: payload?.sourceParagraphs,
+                outputParagraphs: payload?.outputParagraphs,
+                droppedOutputParagraphs: payload?.droppedOutputParagraphs,
+                errorType: payload?.errorType,
+                errorDetail: payload?.errorDetail,
+                reason: payload?.reason,
+              });
+              const attempt = payload?.attempt;
+              const maxAttempts = payload?.maxAttempts;
+              if (attempt && maxAttempts) {
+                const doneParas = payload?.completedParagraphs;
+                const sourceParas = payload?.sourceParagraphs;
+                const suffix = doneParas && sourceParas ? `，已保留 ${doneParas}/${sourceParas} 小段，重译最后未完成小段` : "";
+                setProgress(`翻译第 ${i + 1}/${total} 段（续译 ${attempt}/${maxAttempts}${suffix}）`, i, total);
               }
             },
             onMeta: (payload) => {
