@@ -1,5 +1,4 @@
 const $ = id => document.getElementById(id);
-const CATEGORIES = ["人名","地名","技能","称号","物品","组织","称呼","艺名","本名","其他"];
 const STORAGE_KEY = "postype_global_glossary";
 const PRESET_STORAGE_KEY = "postype_glossary_preset";
 const GLOSSARY_MODE_KEY = "postype_glossary_mode";
@@ -118,17 +117,6 @@ function downloadJSON(data, filename) {
   URL.revokeObjectURL(a.href);
 }
 
-function cleanGlossaryForExport(arr) {
-  return arr
-    .filter(t => t && typeof t.ko === "string" && typeof t.zh === "string")
-    .map(t => ({
-      ko: t.ko.trim(),
-      zh: t.zh.trim(),
-      category: t.category || "其他",
-    }))
-    .filter(t => t.ko && t.zh);
-}
-
 function getGlossaryMode() {
   const mode = localStorage.getItem(GLOSSARY_MODE_KEY);
   return mode === "user" || mode === "preset" ? mode : "preset";
@@ -151,60 +139,6 @@ function updateGlossaryModeLabel() {
   if (submitButton) {
     submitButton.hidden = !isUserGlossary;
   }
-}
-
-function dedupeGlossaryPreferLast(arr) {
-  const map = new Map();
-
-  for (const t of arr) {
-    if (!t || typeof t.ko !== "string" || typeof t.zh !== "string") continue;
-
-    const ko = t.ko.trim();
-    const zh = t.zh.trim();
-    if (!ko || !zh) continue;
-
-    map.set(ko, {
-      ko,
-      zh,
-      category: t.category || "其他",
-    });
-  }
-
-  return Array.from(map.values());
-}
-
-function mergeGlossaryPreferImported(current, imported) {
-  const map = new Map();
-
-  for (const t of current) {
-    if (!t || typeof t.ko !== "string" || typeof t.zh !== "string") continue;
-
-    const ko = t.ko.trim();
-    const zh = t.zh.trim();
-    if (!ko || !zh) continue;
-
-    map.set(ko, {
-      ko,
-      zh,
-      category: t.category || "其他",
-    });
-  }
-
-  for (const t of imported) {
-    if (!t || typeof t.ko !== "string" || typeof t.zh !== "string") continue;
-
-    const ko = t.ko.trim();
-    const zh = t.zh.trim();
-    if (!ko || !zh) continue;
-
-    map.set(ko, {
-      ko,
-      zh,
-      category: t.category || "其他",
-    });
-  }
-
-  return Array.from(map.values());
 }
 
 function isTermsReviewOpen() {
@@ -567,22 +501,6 @@ function saveGlossary(arr, options = {}) {
 
 function getGlossary() {
   return loadGlossary() || [...defaultGlossary];
-}
-
-function normalizeGlossary(arr) {
-  if (!Array.isArray(arr)) return [];
-
-  return arr
-    .filter(t =>
-      t &&
-      typeof t.ko === "string" &&
-      typeof t.zh === "string"
-    )
-    .map(t => ({
-      ko: t.ko,
-      zh: t.zh,
-      category: t.category || "其他",
-    }));
 }
 
 async function fetchGlossaryFile(path) {
