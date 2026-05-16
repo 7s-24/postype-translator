@@ -188,7 +188,8 @@ function updateExtractButtonLabel() {
 }
 
 function setBusy(busy) {
-  $("btn-download").disabled = busy;
+  $("btn-translate").disabled = busy;
+  $("btn-direct-translate").disabled = busy;
   if ($("btn-submit-glossary")) $("btn-submit-glossary").disabled = busy;
   if ($("btn-submit-terms")) $("btn-submit-terms").disabled = busy;
   $("file-html").disabled = busy;
