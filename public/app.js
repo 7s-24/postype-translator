@@ -1172,6 +1172,17 @@ async function translateWithGlossary(glossary) {
               parts[i] = "";
               $("output").value = parts.filter(Boolean).join("\n\n");
               interruptedChunks.add(i + 1);
+              // 诊断信息：把后端给的失败模型、错误类型/详情打到 console，
+              // 方便定位是 thinking 超时、provider 拒绝、还是其它原因。
+              console.warn("[stream restart]", {
+                chunk: i + 1,
+                attempt: payload?.attempt,
+                maxAttempts: payload?.maxAttempts,
+                failedModel: payload?.failedModel,
+                errorType: payload?.errorType,
+                errorDetail: payload?.errorDetail,
+                reason: payload?.reason,
+              });
               const attempt = payload?.attempt;
               const maxAttempts = payload?.maxAttempts;
               if (attempt && maxAttempts) {
