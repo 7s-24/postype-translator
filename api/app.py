@@ -31,11 +31,13 @@ from api.runtime import (
     DASHSCOPE_WRITE_TIMEOUT_SEC,
     FIX_HANDLER_BUDGET_SEC,
     GOOGLE_RESERVE_SEC,
+    GOOGLE_REQUEST_TIMEOUT_SEC,
     HANDLER_TOTAL_BUDGET_SEC,
     MAX_CHARS,
     MODEL_STATE_FILE,
     SENSITIVE_FALLBACK_BUDGET_SEC,
     STREAM_HANDLER_BUDGET_SEC,
+    DEADLINE_SHUTDOWN_BUFFER_SEC,
     deadline_exceeded,
     deadline_remaining,
 )
@@ -118,6 +120,55 @@ def friendly_provider_error(exc: Exception) -> str:
     if is_bad_request_error(exc) and not is_quota_error(exc):
         return ERRORS["PROVIDER_BAD_REQUEST"]
     return ERRORS["PROVIDER_UNAVAILABLE"]
+
+def _remaining_budget(deadline, reserve=DEADLINE_SHUTDOWN_BUFFER_SEC):
+    """Return seconds left before a deadline after keeping a shutdown buffer."""
+    if deadline is None:
+        return None
+    return max(0.0, deadline_remaining(deadline) - reserve)
+
+
+def _ensure_deadline_budget(deadline, reserve=DEADLINE_SHUTDOWN_BUFFER_SEC):
+    remaining = _remaining_budget(deadline, reserve=reserve)
+    if remaining is not None and remaining <= 0:
+        raise TimeoutError("handler deadline budget exhausted")
+    return remaining
+
+
+def dashscope_timeout_kwargs(deadline=None):
+    """Build per-call OpenAI timeout kwargs clipped to the handler deadline.
+
+    The OpenAI client has global HTTP timeouts, but a request started near the
+    end of a Vercel invocation could still wait for the full read timeout.  This
+    helper shrinks per-request timeouts so model calls fail back before Vercel
+    kills the function.
+    """
+    remaining = _ensure_deadline_budget(deadline)
+    if remaining is None:
+        return {}
+
+    read_timeout = max(1.0, min(DASHSCOPE_READ_TIMEOUT_SEC, remaining))
+    connect_timeout = max(1.0, min(DASHSCOPE_CONNECT_TIMEOUT_SEC, remaining))
+    write_timeout = max(1.0, min(DASHSCOPE_WRITE_TIMEOUT_SEC, remaining))
+    pool_timeout = max(1.0, min(DASHSCOPE_POOL_TIMEOUT_SEC, remaining))
+    return {
+        "timeout": httpx.Timeout(
+            connect=connect_timeout,
+            read=read_timeout,
+            write=write_timeout,
+            pool=pool_timeout,
+        )
+    }
+
+
+def google_request_timeout(deadline=None):
+    remaining = _remaining_budget(deadline, reserve=DEADLINE_SHUTDOWN_BUFFER_SEC)
+    if remaining is None:
+        return GOOGLE_REQUEST_TIMEOUT_SEC
+    if remaining <= 0:
+        raise TimeoutError("not enough time left for google fallback")
+    return max(1.0, min(GOOGLE_REQUEST_TIMEOUT_SEC, remaining))
+
 
 # ---------------------------------------------------------------------------
 # System prompts（仅给非 mt 模型使用）
@@ -653,7 +704,7 @@ def translate_by_google(text: str) -> str:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {"client": "gtx", "sl": "ko", "tl": "zh-CN", "dt": "t", "q": text[:5000]}
         headers = {"User-Agent": "Mozilla/5.0 Chrome/122.0 Safari/537.36"}
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        resp = requests.get(url, params=params, headers=headers, timeout=google_request_timeout(deadline))
         if resp.status_code == 200:
             data = resp.json()
             if isinstance(data, list) and isinstance(data[0], list):
@@ -663,10 +714,10 @@ def translate_by_google(text: str) -> str:
     return text
 
 
-def translate_by_google_with_glossary(text: str, glossary: list) -> str:
+def translate_by_google_with_glossary(text: str, glossary: list, deadline=None) -> str:
     glossary = glossary or []
     prepared = preprocess_source_with_glossary(text, glossary)
-    translated = translate_by_google(prepared)
+    translated = translate_by_google(prepared, deadline=deadline)
     return apply_glossary_to_text(translated, glossary)
 
 
@@ -786,12 +837,17 @@ def translate_chunk(
     retry_count=0,
     allow_google_fallback=True,
     enable_internal_retry=True,
+    deadline=None,
 ):
     try:
         if is_qwen_mt_model(model):
             # mt 系列：纯源文 + translation_options，舍弃上下文（mt 不支持多轮）
             mt_kwargs = build_qwen_mt_request(chunk, glossary=glossary)
-            response = client.chat.completions.create(model=model, **mt_kwargs)
+            response = client.chat.completions.create(
+                model=model,
+                **mt_kwargs,
+                **dashscope_timeout_kwargs(deadline),
+            )
         else:
             user_prompt = build_translation_user_prompt(
                 chunk, index, total, previous_translation, glossary,
@@ -800,6 +856,7 @@ def translate_chunk(
                 model=model,
                 messages=build_chat_messages(SYSTEM_PROMPT, user_prompt, model),
                 temperature=0.2,
+                **dashscope_timeout_kwargs(deadline),
             )
         return response.choices[0].message.content.strip()
     except Exception as exc:
@@ -821,12 +878,13 @@ def translate_chunk(
                                 previous_translation, glossary,
                                 model=model, retry_count=1,
                                 allow_google_fallback=allow_google_fallback,
+                                deadline=deadline,
                             )
                         )
                     except Exception as exc:
                         if is_quota_error(exc) or is_sensitive_content_error(exc) or not allow_google_fallback:
                             raise
-                        fallback = translate_by_google_with_glossary(sc, glossary or [])
+                        fallback = translate_by_google_with_glossary(sc, glossary or [], deadline=deadline)
                         results.append(TranslationText(fallback, used_google=True))
                 return TranslationText(
                     "\n".join(results),
@@ -834,7 +892,7 @@ def translate_chunk(
                 )
         if not allow_google_fallback:
             raise
-        fallback = translate_by_google_with_glossary(chunk, glossary or [])
+        fallback = translate_by_google_with_glossary(chunk, glossary or [], deadline=deadline)
         if fallback and fallback != chunk:
             return TranslationText(fallback, used_google=True)
         raise
@@ -870,6 +928,7 @@ def translate_chunk_stream(
             model=model,
             stream=True,
             **mt_kwargs,
+            **dashscope_timeout_kwargs(deadline),
         )
     else:
         user_prompt = build_translation_user_prompt(
@@ -880,6 +939,7 @@ def translate_chunk_stream(
             messages=build_chat_messages(SYSTEM_PROMPT, user_prompt, model),
             temperature=0.2,
             stream=True,
+            **dashscope_timeout_kwargs(deadline),
         )
 
     parts = []
@@ -949,12 +1009,18 @@ def translate_chunk_stream(
     return TranslationText("".join(parts).strip())
 
 
-def translate_by_google_split_with_glossary(chunk: str, glossary: list) -> TranslationText:
-    results = [
-        translate_by_google_with_glossary(sub_chunk, glossary or [])
-        for sub_chunk in split_chunk_further(chunk)
-    ]
-    return TranslationText("\n".join(results), used_google=True)
+def translate_by_google_split_with_glossary(chunk: str, glossary: list, deadline=None) -> TranslationText:
+    results = []
+    for sub_chunk in split_chunk_further(chunk):
+        if deadline_exceeded(deadline):
+            break
+        results.append(
+            translate_by_google_with_glossary(sub_chunk, glossary or [], deadline=deadline)
+        )
+
+    # If the deadline leaves no room for Google, return the original chunk rather
+    # than letting the serverless invocation run into Vercel's hard timeout.
+    return TranslationText("\n".join(results) if results else chunk, used_google=True)
 
 
 def randomized_sensitive_fallback_models():
@@ -1016,6 +1082,7 @@ def run_sensitive_fallback_models(client, chunk, index, total, previous, glossar
             glossary=glossary, model=model,
             allow_google_fallback=False,
             enable_internal_retry=False,
+            deadline=deadline,
         ),
         deadline=deadline,
     )
@@ -1029,7 +1096,7 @@ def contains_korean(text: str) -> bool:
     return bool(re.search(r"[\u3131-\u318E\uAC00-\uD7A3]", text))
 
 
-def fix_korean_line(client, line, previous="", next_line="", model=MODEL_QUALITY):
+def fix_korean_line(client, line, previous="", next_line="", model=MODEL_QUALITY, deadline=None):
     if is_qwen_mt_model(model):
         raise RuntimeError(f"fix_korean_line 不支持 Qwen-MT 模型: {model}")
     prompt = (
@@ -1042,6 +1109,7 @@ def fix_korean_line(client, line, previous="", next_line="", model=MODEL_QUALITY
         model=model,
         messages=build_chat_messages(FIX_SYSTEM_PROMPT, prompt, model),
         temperature=0.2,
+        **dashscope_timeout_kwargs(deadline),
     )
     return response.choices[0].message.content.strip()
 
@@ -1057,6 +1125,7 @@ def fix_translation_chunk(
     index=1,
     total=1,
     model=MODEL_QUALITY,
+    deadline=None,
 ):
     if is_qwen_mt_model(model):
         raise RuntimeError(f"fix_translation_chunk 不支持 Qwen-MT 模型: {model}")
@@ -1078,6 +1147,7 @@ def fix_translation_chunk(
         model=model,
         messages=build_chat_messages(FIX_SYSTEM_PROMPT, prompt, model),
         temperature=0.2,
+        **dashscope_timeout_kwargs(deadline),
     )
     return response.choices[0].message.content.strip()
 
@@ -1092,6 +1162,7 @@ def fix_fallback_names_and_subjects_chunk(
     index=1,
     total=1,
     model=MODEL_QUALITY,
+    deadline=None,
 ):
     if is_qwen_mt_model(model):
         raise RuntimeError(f"fix_fallback_names_and_subjects_chunk 不支持 Qwen-MT 模型: {model}")
@@ -1108,6 +1179,7 @@ def fix_fallback_names_and_subjects_chunk(
         model=model,
         messages=build_chat_messages(SIMPLE_FALLBACK_FIX_SYSTEM_PROMPT, prompt, model),
         temperature=0.1,
+        **dashscope_timeout_kwargs(deadline),
     )
     return response.choices[0].message.content.strip()
 
@@ -1206,6 +1278,7 @@ def fix_translated_chunks(
                     index=chunk_no,
                     total=total,
                     model=model,
+                    deadline=deadline,
                 )
                 last_model_used = model
                 break
@@ -1239,6 +1312,7 @@ def fix_translated_chunks(
                         index=chunk_no,
                         total=total,
                         model=model,
+                        deadline=deadline,
                     )
                     last_model_used = model
                     break
@@ -1269,7 +1343,7 @@ def fix_translated_chunks(
     return "\n\n".join(fixed), meta
 
 
-def fix_korean_text(client, text, model=MODEL_QUALITY):
+def fix_korean_text(client, text, model=MODEL_QUALITY, deadline=None):
     """Legacy line-by-line fix path (kept for backwards compatibility).
 
     Called only when the client didn't send chunked source/translated arrays.
@@ -1282,7 +1356,7 @@ def fix_korean_text(client, text, model=MODEL_QUALITY):
         if contains_korean(line):
             prev = lines[idx - 1] if idx > 0 else ""
             nxt = lines[idx + 1] if idx < len(lines) - 1 else ""
-            fixed.append(fix_korean_line(client, line, prev, nxt, model=model))
+            fixed.append(fix_korean_line(client, line, prev, nxt, model=model, deadline=deadline))
         else:
             fixed.append(line)
     return "\n".join(fixed)
@@ -1715,7 +1789,7 @@ class handler(BaseHTTPRequestHandler):
                     pass  # fall through to google
 
         # Google fallback (last resort).
-        translated = translate_by_google_split_with_glossary(chunk, glossary or [])
+        translated = translate_by_google_split_with_glossary(chunk, glossary or [], deadline=overall_deadline)
         self._send_stream_fallback_result(
             translated,
             note="此 chunk 使用了机械翻译",
@@ -1954,6 +2028,7 @@ class handler(BaseHTTPRequestHandler):
                             glossary=glossary, model=model,
                             allow_google_fallback=False,
                             enable_internal_retry=False,
+                            deadline=non_stream_deadline,
                         ),
                         model_session_id=model_session_id,
                     )
@@ -1989,7 +2064,7 @@ class handler(BaseHTTPRequestHandler):
                         except Exception:
                             pass
 
-                    translated = translate_by_google_split_with_glossary(chunk, glossary or [])
+                    translated = translate_by_google_split_with_glossary(chunk, glossary or [], deadline=non_stream_deadline)
                     return self._send_json(200, {
                         "ok": True, "translated": str(translated), "fallback": True,
                         "fallbackType": "google",
@@ -2083,10 +2158,13 @@ class handler(BaseHTTPRequestHandler):
                         "exhaustedModels": status_info["exhaustedModels"],
                     }
                 else:
-                    # 旧 line-by-line 路径，保留原行为
+                    # 旧 line-by-line 路径，保留原行为，同时复用同一个全局 deadline。
+                    fix_deadline = time.monotonic() + FIX_HANDLER_BUDGET_SEC
                     fixed, meta = self._run_with_model_rotation(
                         tier,
-                        lambda model: fix_korean_text(client, translated_text, model=model),
+                        lambda model: fix_korean_text(
+                            client, translated_text, model=model, deadline=fix_deadline,
+                        ),
                         rotate_on_bad_request=True,
                         model_session_id=model_session_id,
                         allow_mt=False,

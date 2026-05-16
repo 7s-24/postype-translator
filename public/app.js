@@ -3,7 +3,7 @@ const STORAGE_KEY = "postype_global_glossary";
 const PRESET_STORAGE_KEY = "postype_glossary_preset";
 const GLOSSARY_MODE_KEY = "postype_glossary_mode";
 const GLOSSARY_SUBMITTER_NICKNAME_KEY = "postype_glossary_submitter_nickname";
-const BATCH_SIZE = 4; // parallel concurrency
+const BATCH_SIZE = 2; // parallel concurrency; keep Vercel invocations below timeout pressure
 
 const DEFAULT_GLOSSARY = [
   { ko:"신유",   zh:"申惟",   category:"艺名" },
