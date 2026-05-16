@@ -1108,21 +1108,27 @@ def fix_translated_chunks(
     translated_chunks,
     fallback_indices=None,
     google_fallback_indices=None,
+    skip_fix_indices=None,
     glossary=None,
     model=MODEL_QUALITY,
 ):
     fallback_set = set(fallback_indices or [])
     google_fallback_set = set(google_fallback_indices or [])
+    skip_fix_set = set(skip_fix_indices or [])
     fixed = list(translated_chunks)
     total = len(fixed)
 
     for idx, translated in enumerate(translated_chunks):
         chunk_no = idx + 1
+        source = source_chunks[idx] if idx < len(source_chunks) else ""
+        if chunk_no in skip_fix_set:
+            if chunk_no in google_fallback_set:
+                fixed[idx] = format_google_fallback_with_source(translated, source)
+            continue
+
         used_fallback = chunk_no in fallback_set
         if not contains_korean(translated) and not used_fallback:
             continue
-
-        source = source_chunks[idx] if idx < len(source_chunks) else ""
         previous_translation = fixed[idx - 1] if idx > 0 else ""
         next_translation = translated_chunks[idx + 1] if idx < total - 1 else ""
         try:
@@ -1726,11 +1732,30 @@ class handler(BaseHTTPRequestHandler):
                 translated_chunks = data.get("translated_chunks", [])
                 fallback_indices = data.get("fallback_indices", [])
                 google_fallback_indices = data.get("google_fallback_indices", [])
+                skip_fix_indices = data.get("skip_fix_indices", [])
                 glossary = data.get("glossary", [])
-                if not isinstance(fallback_indices, list):
-                    fallback_indices = []
-                if not isinstance(google_fallback_indices, list):
-                    google_fallback_indices = []
+
+                def parse_index_set(value):
+                    if not isinstance(value, list):
+                        return set()
+                    index_set = set()
+                    for item in value:
+                        if isinstance(item, bool):
+                            continue
+                        if isinstance(item, int):
+                            if item > 0:
+                                index_set.add(item)
+                            continue
+                        if isinstance(item, str):
+                            stripped = item.strip()
+                            if stripped.isdigit():
+                                index_set.add(int(stripped))
+                    return index_set
+
+                fallback_index_set = parse_index_set(fallback_indices)
+                google_fallback_index_set = parse_index_set(google_fallback_indices)
+                skip_fix_index_set = parse_index_set(skip_fix_indices)
+                skipped_fix_indices = sorted(skip_fix_index_set)
 
                 # fix 任务需要 system prompt + 复杂判断，mt 模型不能用
                 if isinstance(source_chunks, list) and isinstance(translated_chunks, list) and translated_chunks:
@@ -1740,8 +1765,9 @@ class handler(BaseHTTPRequestHandler):
                             client,
                             [str(chunk) for chunk in source_chunks],
                             [str(chunk) for chunk in translated_chunks],
-                            fallback_indices=[int(i) for i in fallback_indices if str(i).isdigit()],
-                            google_fallback_indices=[int(i) for i in google_fallback_indices if str(i).isdigit()],
+                            fallback_indices=fallback_index_set,
+                            google_fallback_indices=google_fallback_index_set,
+                            skip_fix_indices=skip_fix_index_set,
                             glossary=glossary,
                             model=model,
                         ),
@@ -1757,7 +1783,13 @@ class handler(BaseHTTPRequestHandler):
                         model_session_id=model_session_id,
                         allow_mt=False,
                     )
-                return self._send_json(200, {"ok": True, "fixed_text": fixed, **meta})
+                return self._send_json(200, {
+                    "ok": True,
+                    "fixed_text": fixed,
+                    "skipped": bool(skipped_fix_indices),
+                    "skippedFixIndices": skipped_fix_indices,
+                    **meta,
+                })
 
             status, payload = error_response("UNKNOWN_ACTION", 400)
             self._send_json(status, payload)
