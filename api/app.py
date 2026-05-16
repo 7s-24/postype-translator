@@ -1321,9 +1321,7 @@ class handler(BaseHTTPRequestHandler):
             raise last_exc
         raise RuntimeError("没有可用模型")
 
-    # 流式翻译被中断后，最多尝试切换的模型数量。
-    # 防止个别 chunk 在多个模型上反复中断导致请求时间爆炸。
-    STREAM_INTERRUPTION_MAX_RETRIES = 2
+    STREAM_INTERRUPTION_MAX_RETRIES = 6
 
     def _stream_with_model_rotation(
         self,
