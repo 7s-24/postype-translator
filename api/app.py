@@ -1,5 +1,6 @@
 from http.server import BaseHTTPRequestHandler
 from openai import OpenAI
+import httpx
 from bs4 import BeautifulSoup
 import requests
 import json
@@ -94,6 +95,38 @@ MODEL_QUALITY = STANDARD_MODELS[0]
 MODEL_FAST    = LIGHT_MODELS[0]
 MAX_CHARS     = 3000          # bigger chunks → fewer API calls
 MODEL_STATE_FILE = os.getenv("MODEL_STATE_FILE", "/tmp/postype_translator_model_state.json")
+
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+# DashScope/OpenAI-compatible HTTP timeouts.  The defaults intentionally stay
+# well below Vercel's 300s runtime limit so a half-open provider connection can
+# fail into the existing model-rotation/fallback paths instead of exhausting the
+# whole serverless invocation.
+DASHSCOPE_CONNECT_TIMEOUT_SEC = env_float("DASHSCOPE_CONNECT_TIMEOUT_SEC", 10.0)
+DASHSCOPE_READ_TIMEOUT_SEC = env_float("DASHSCOPE_READ_TIMEOUT_SEC", 45.0)
+DASHSCOPE_WRITE_TIMEOUT_SEC = env_float("DASHSCOPE_WRITE_TIMEOUT_SEC", 10.0)
+DASHSCOPE_POOL_TIMEOUT_SEC = env_float("DASHSCOPE_POOL_TIMEOUT_SEC", 10.0)
+DASHSCOPE_MAX_RETRIES = env_int("DASHSCOPE_MAX_RETRIES", 0)
 
 ERROR_ACTION = "如果方便的话，可以复制以下的错误码，并描述错误产生的情况，提交给 fedrick1plela755@gmail.com 来帮助改进："
 
@@ -1234,6 +1267,13 @@ class handler(BaseHTTPRequestHandler):
         return OpenAI(
             base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
             api_key=api_key,
+            timeout=httpx.Timeout(
+                connect=DASHSCOPE_CONNECT_TIMEOUT_SEC,
+                read=DASHSCOPE_READ_TIMEOUT_SEC,
+                write=DASHSCOPE_WRITE_TIMEOUT_SEC,
+                pool=DASHSCOPE_POOL_TIMEOUT_SEC,
+            ),
+            max_retries=DASHSCOPE_MAX_RETRIES,
         )
 
     def _tier_name(self, data):
