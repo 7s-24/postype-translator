@@ -199,8 +199,8 @@ function setBusy(busy) {
   if (busy) {
     $("btn-translate").disabled = false;
     $("btn-direct-translate").disabled = false;
-    $("btn-translate").textContent = "重新翻译";
-    $("btn-direct-translate").textContent = "重新开始";
+    $("btn-translate").textContent = "重新提取术语";
+    $("btn-direct-translate").textContent = "重新直接翻译";
   } else {
     $("btn-translate").disabled = false;
     $("btn-direct-translate").disabled = false;
