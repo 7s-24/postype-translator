@@ -120,9 +120,17 @@ function setGlossaryMode(mode) {
 }
 
 function updateGlossaryModeLabel() {
+  const isUserGlossary = getGlossaryMode() === "user";
   const title = $("glossary-title");
-  if (!title) return;
-  title.textContent = getGlossaryMode() === "user" ? "我的术语库" : "预设术语库";
+  const submitButton = $("btn-submit-glossary");
+
+  if (title) {
+    title.textContent = isUserGlossary ? "我的术语库" : "预设术语库";
+  }
+
+  if (submitButton) {
+    submitButton.hidden = !isUserGlossary;
+  }
 }
 
 function dedupeGlossaryPreferLast(arr) {
@@ -919,6 +927,12 @@ function getGlossarySubmitEntries(scope) {
 }
 
 async function submitGlossaryUpload(scope = "global") {
+  if (scope === "global" && getGlossaryMode() !== "user") {
+    showError("只有我的术语库可以分享。请先添加、编辑或导入术语哦！");
+    updateGlossaryModeLabel();
+    return;
+  }
+
   const entries = getGlossarySubmitEntries(scope);
   const label = scope === "article" ? "篇章术语" : "个人术语";
   const btn = scope === "article" ? $("btn-submit-terms") : $("btn-submit-glossary");
