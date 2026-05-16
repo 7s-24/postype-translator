@@ -1005,7 +1005,18 @@ def translate_chunk_stream(
             choices = getattr(event, "choices", None) or []
             if not choices:
                 continue
-            delta = getattr(choices[0], "delta", None)
+
+            choice = choices[0]
+            # DashScope/OpenAI-compatible streams may send a terminal choice with
+            # finish_reason before the underlying SSE socket is fully closed. If
+            # we ignore that terminal marker, the handler can sit in the next
+            # iterator read until the HTTP read timeout, which looks like a long
+            # pause after the visible translation for every chunk.
+            finish_reason = getattr(choice, "finish_reason", None)
+            if finish_reason:
+                break
+
+            delta = getattr(choice, "delta", None)
             content = getattr(delta, "content", None) if delta else None
             if not content:
                 continue
