@@ -31,11 +31,13 @@ from api.runtime import (
     DASHSCOPE_WRITE_TIMEOUT_SEC,
     FIX_HANDLER_BUDGET_SEC,
     GOOGLE_RESERVE_SEC,
+    GOOGLE_REQUEST_TIMEOUT_SEC,
     HANDLER_TOTAL_BUDGET_SEC,
     MAX_CHARS,
     MODEL_STATE_FILE,
     SENSITIVE_FALLBACK_BUDGET_SEC,
     STREAM_HANDLER_BUDGET_SEC,
+    DEADLINE_SHUTDOWN_BUFFER_SEC,
     deadline_exceeded,
     deadline_remaining,
 )
@@ -118,6 +120,55 @@ def friendly_provider_error(exc: Exception) -> str:
     if is_bad_request_error(exc) and not is_quota_error(exc):
         return ERRORS["PROVIDER_BAD_REQUEST"]
     return ERRORS["PROVIDER_UNAVAILABLE"]
+
+def _remaining_budget(deadline, reserve=DEADLINE_SHUTDOWN_BUFFER_SEC):
+    """Return seconds left before a deadline after keeping a shutdown buffer."""
+    if deadline is None:
+        return None
+    return max(0.0, deadline_remaining(deadline) - reserve)
+
+
+def _ensure_deadline_budget(deadline, reserve=DEADLINE_SHUTDOWN_BUFFER_SEC):
+    remaining = _remaining_budget(deadline, reserve=reserve)
+    if remaining is not None and remaining <= 0:
+        raise TimeoutError("handler deadline budget exhausted")
+    return remaining
+
+
+def dashscope_timeout_kwargs(deadline=None):
+    """Build per-call OpenAI timeout kwargs clipped to the handler deadline.
+
+    The OpenAI client has global HTTP timeouts, but a request started near the
+    end of a Vercel invocation could still wait for the full read timeout.  This
+    helper shrinks per-request timeouts so model calls fail back before Vercel
+    kills the function.
+    """
+    remaining = _ensure_deadline_budget(deadline)
+    if remaining is None:
+        return {}
+
+    read_timeout = max(1.0, min(DASHSCOPE_READ_TIMEOUT_SEC, remaining))
+    connect_timeout = max(1.0, min(DASHSCOPE_CONNECT_TIMEOUT_SEC, remaining))
+    write_timeout = max(1.0, min(DASHSCOPE_WRITE_TIMEOUT_SEC, remaining))
+    pool_timeout = max(1.0, min(DASHSCOPE_POOL_TIMEOUT_SEC, remaining))
+    return {
+        "timeout": httpx.Timeout(
+            connect=connect_timeout,
+            read=read_timeout,
+            write=write_timeout,
+            pool=pool_timeout,
+        )
+    }
+
+
+def google_request_timeout(deadline=None):
+    remaining = _remaining_budget(deadline, reserve=DEADLINE_SHUTDOWN_BUFFER_SEC)
+    if remaining is None:
+        return GOOGLE_REQUEST_TIMEOUT_SEC
+    if remaining <= 0:
+        raise TimeoutError("not enough time left for google fallback")
+    return max(1.0, min(GOOGLE_REQUEST_TIMEOUT_SEC, remaining))
+
 
 # ---------------------------------------------------------------------------
 # System prompts（仅给非 mt 模型使用）
@@ -573,6 +624,11 @@ class TranslationText(str):
 class StreamingTranslationInterrupted(Exception):
     """Raised when a streaming provider call fails after tokens reached client."""
 
+    def __init__(self, message="", partial_translation="", remaining_chunk=""):
+        super().__init__(message)
+        self.partial_translation = partial_translation
+        self.remaining_chunk = remaining_chunk
+
 
 class StreamingClientGoneError(Exception):
     """Raised when the client closed the SSE connection (page unloaded, etc.)."""
@@ -591,12 +647,64 @@ class StreamingDeadlineExceeded(Exception):
     """
 
 
+
+
+def split_paragraph_blocks(text: str) -> list:
+    """Return non-empty paragraph blocks while tolerating single/blank newlines."""
+    text = (text or "").replace("\r\n", "\n").strip()
+    if not text:
+        return []
+    blocks = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    if len(blocks) == 1 and "\n" in text:
+        line_blocks = [part.strip() for part in text.split("\n") if part.strip()]
+        if len(line_blocks) > 1:
+            return line_blocks
+    return blocks
+
+
+def join_translation_parts(*parts: str) -> str:
+    clean = [str(part).strip() for part in parts if str(part or "").strip()]
+    return "\n\n".join(clean)
+
+
+def infer_stream_resume_state(source_text: str, streamed_text: str):
+    """Infer completed source paragraphs from partial streamed translation.
+
+    The streamed answer can be cut mid-paragraph when the provider connection
+    dies.  Blank paragraphs are ignored for counting, and the final non-empty
+    output paragraph is treated as incomplete: it is dropped and translated
+    again from the matching source paragraph.
+    """
+    source_paras = split_paragraph_blocks(source_text)
+    output_paras = split_paragraph_blocks(streamed_text)
+    if len(source_paras) <= 1 or len(output_paras) <= 1:
+        return None
+
+    # The last non-empty streamed paragraph may have been cut off mid-sentence
+    # when the stream died, so never count it as completed.  Empty paragraphs are
+    # already ignored by split_paragraph_blocks and do not affect the resume
+    # point.
+    completed = max(0, min(len(output_paras) - 1, len(source_paras)))
+    if completed <= 0:
+        return None
+
+    kept_text = "\n\n".join(output_paras[:completed]).strip()
+    remaining_chunk = "\n\n".join(source_paras[completed:]).strip()
+    return {
+        "completedParagraphs": completed,
+        "sourceParagraphs": len(source_paras),
+        "outputParagraphs": len(output_paras),
+        "droppedOutputParagraphs": len(output_paras) - completed,
+        "keptText": kept_text,
+        "remainingChunk": remaining_chunk,
+    }
+
 def translate_by_google(text: str) -> str:
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {"client": "gtx", "sl": "ko", "tl": "zh-CN", "dt": "t", "q": text[:5000]}
         headers = {"User-Agent": "Mozilla/5.0 Chrome/122.0 Safari/537.36"}
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        resp = requests.get(url, params=params, headers=headers, timeout=google_request_timeout(deadline))
         if resp.status_code == 200:
             data = resp.json()
             if isinstance(data, list) and isinstance(data[0], list):
@@ -606,10 +714,10 @@ def translate_by_google(text: str) -> str:
     return text
 
 
-def translate_by_google_with_glossary(text: str, glossary: list) -> str:
+def translate_by_google_with_glossary(text: str, glossary: list, deadline=None) -> str:
     glossary = glossary or []
     prepared = preprocess_source_with_glossary(text, glossary)
-    translated = translate_by_google(prepared)
+    translated = translate_by_google(prepared, deadline=deadline)
     return apply_glossary_to_text(translated, glossary)
 
 
@@ -729,12 +837,17 @@ def translate_chunk(
     retry_count=0,
     allow_google_fallback=True,
     enable_internal_retry=True,
+    deadline=None,
 ):
     try:
         if is_qwen_mt_model(model):
             # mt 系列：纯源文 + translation_options，舍弃上下文（mt 不支持多轮）
             mt_kwargs = build_qwen_mt_request(chunk, glossary=glossary)
-            response = client.chat.completions.create(model=model, **mt_kwargs)
+            response = client.chat.completions.create(
+                model=model,
+                **mt_kwargs,
+                **dashscope_timeout_kwargs(deadline),
+            )
         else:
             user_prompt = build_translation_user_prompt(
                 chunk, index, total, previous_translation, glossary,
@@ -743,6 +856,7 @@ def translate_chunk(
                 model=model,
                 messages=build_chat_messages(SYSTEM_PROMPT, user_prompt, model),
                 temperature=0.2,
+                **dashscope_timeout_kwargs(deadline),
             )
         return response.choices[0].message.content.strip()
     except Exception as exc:
@@ -764,12 +878,13 @@ def translate_chunk(
                                 previous_translation, glossary,
                                 model=model, retry_count=1,
                                 allow_google_fallback=allow_google_fallback,
+                                deadline=deadline,
                             )
                         )
                     except Exception as exc:
                         if is_quota_error(exc) or is_sensitive_content_error(exc) or not allow_google_fallback:
                             raise
-                        fallback = translate_by_google_with_glossary(sc, glossary or [])
+                        fallback = translate_by_google_with_glossary(sc, glossary or [], deadline=deadline)
                         results.append(TranslationText(fallback, used_google=True))
                 return TranslationText(
                     "\n".join(results),
@@ -777,7 +892,7 @@ def translate_chunk(
                 )
         if not allow_google_fallback:
             raise
-        fallback = translate_by_google_with_glossary(chunk, glossary or [])
+        fallback = translate_by_google_with_glossary(chunk, glossary or [], deadline=deadline)
         if fallback and fallback != chunk:
             return TranslationText(fallback, used_google=True)
         raise
@@ -813,6 +928,7 @@ def translate_chunk_stream(
             model=model,
             stream=True,
             **mt_kwargs,
+            **dashscope_timeout_kwargs(deadline),
         )
     else:
         user_prompt = build_translation_user_prompt(
@@ -823,6 +939,7 @@ def translate_chunk_stream(
             messages=build_chat_messages(SYSTEM_PROMPT, user_prompt, model),
             temperature=0.2,
             stream=True,
+            **dashscope_timeout_kwargs(deadline),
         )
 
     parts = []
@@ -892,12 +1009,18 @@ def translate_chunk_stream(
     return TranslationText("".join(parts).strip())
 
 
-def translate_by_google_split_with_glossary(chunk: str, glossary: list) -> TranslationText:
-    results = [
-        translate_by_google_with_glossary(sub_chunk, glossary or [])
-        for sub_chunk in split_chunk_further(chunk)
-    ]
-    return TranslationText("\n".join(results), used_google=True)
+def translate_by_google_split_with_glossary(chunk: str, glossary: list, deadline=None) -> TranslationText:
+    results = []
+    for sub_chunk in split_chunk_further(chunk):
+        if deadline_exceeded(deadline):
+            break
+        results.append(
+            translate_by_google_with_glossary(sub_chunk, glossary or [], deadline=deadline)
+        )
+
+    # If the deadline leaves no room for Google, return the original chunk rather
+    # than letting the serverless invocation run into Vercel's hard timeout.
+    return TranslationText("\n".join(results) if results else chunk, used_google=True)
 
 
 def randomized_sensitive_fallback_models():
@@ -959,6 +1082,7 @@ def run_sensitive_fallback_models(client, chunk, index, total, previous, glossar
             glossary=glossary, model=model,
             allow_google_fallback=False,
             enable_internal_retry=False,
+            deadline=deadline,
         ),
         deadline=deadline,
     )
@@ -972,7 +1096,7 @@ def contains_korean(text: str) -> bool:
     return bool(re.search(r"[\u3131-\u318E\uAC00-\uD7A3]", text))
 
 
-def fix_korean_line(client, line, previous="", next_line="", model=MODEL_QUALITY):
+def fix_korean_line(client, line, previous="", next_line="", model=MODEL_QUALITY, deadline=None):
     if is_qwen_mt_model(model):
         raise RuntimeError(f"fix_korean_line 不支持 Qwen-MT 模型: {model}")
     prompt = (
@@ -985,6 +1109,7 @@ def fix_korean_line(client, line, previous="", next_line="", model=MODEL_QUALITY
         model=model,
         messages=build_chat_messages(FIX_SYSTEM_PROMPT, prompt, model),
         temperature=0.2,
+        **dashscope_timeout_kwargs(deadline),
     )
     return response.choices[0].message.content.strip()
 
@@ -1000,6 +1125,7 @@ def fix_translation_chunk(
     index=1,
     total=1,
     model=MODEL_QUALITY,
+    deadline=None,
 ):
     if is_qwen_mt_model(model):
         raise RuntimeError(f"fix_translation_chunk 不支持 Qwen-MT 模型: {model}")
@@ -1021,6 +1147,7 @@ def fix_translation_chunk(
         model=model,
         messages=build_chat_messages(FIX_SYSTEM_PROMPT, prompt, model),
         temperature=0.2,
+        **dashscope_timeout_kwargs(deadline),
     )
     return response.choices[0].message.content.strip()
 
@@ -1035,6 +1162,7 @@ def fix_fallback_names_and_subjects_chunk(
     index=1,
     total=1,
     model=MODEL_QUALITY,
+    deadline=None,
 ):
     if is_qwen_mt_model(model):
         raise RuntimeError(f"fix_fallback_names_and_subjects_chunk 不支持 Qwen-MT 模型: {model}")
@@ -1051,6 +1179,7 @@ def fix_fallback_names_and_subjects_chunk(
         model=model,
         messages=build_chat_messages(SIMPLE_FALLBACK_FIX_SYSTEM_PROMPT, prompt, model),
         temperature=0.1,
+        **dashscope_timeout_kwargs(deadline),
     )
     return response.choices[0].message.content.strip()
 
@@ -1149,6 +1278,7 @@ def fix_translated_chunks(
                     index=chunk_no,
                     total=total,
                     model=model,
+                    deadline=deadline,
                 )
                 last_model_used = model
                 break
@@ -1182,6 +1312,7 @@ def fix_translated_chunks(
                         index=chunk_no,
                         total=total,
                         model=model,
+                        deadline=deadline,
                     )
                     last_model_used = model
                     break
@@ -1212,7 +1343,7 @@ def fix_translated_chunks(
     return "\n\n".join(fixed), meta
 
 
-def fix_korean_text(client, text, model=MODEL_QUALITY):
+def fix_korean_text(client, text, model=MODEL_QUALITY, deadline=None):
     """Legacy line-by-line fix path (kept for backwards compatibility).
 
     Called only when the client didn't send chunked source/translated arrays.
@@ -1225,7 +1356,7 @@ def fix_korean_text(client, text, model=MODEL_QUALITY):
         if contains_korean(line):
             prev = lines[idx - 1] if idx > 0 else ""
             nxt = lines[idx + 1] if idx < len(lines) - 1 else ""
-            fixed.append(fix_korean_line(client, line, prev, nxt, model=model))
+            fixed.append(fix_korean_line(client, line, prev, nxt, model=model, deadline=deadline))
         else:
             fixed.append(line)
     return "\n".join(fixed)
@@ -1455,37 +1586,43 @@ class handler(BaseHTTPRequestHandler):
         last_exc = None
         interruption_retries = 0  # 中断后切模型重试的累计次数
         any_tokens_sent = False    # 跨重试累计：是否曾向客户端发送过 delta
+        completed_translation = ""
+        active_chunk = chunk
+        active_previous = previous
+        resume_count = 0
 
         for model in models:
-            # Deadline 守门：每次进入新模型前都检查一次。如果在重试过程中已经
-            # 向前端 push 过 delta，按"中断"语义抛 StreamingTranslationInterrupted
-            # 让 SSE 处理器发 restart + 进入 sensitive/google 兜底；否则按未发
-            # 任何内容抛 StreamingDeadlineExceeded 直接走兜底。
+            # Deadline 守门：每次进入新模型前都检查一次。如果已经保留了部分
+            # 段落，则把剩余原文交给兜底链，而不是整段清空重来。
             if deadline_exceeded(deadline):
                 if any_tokens_sent or interruption_retries > 0:
                     raise StreamingTranslationInterrupted(
-                        f"handler deadline exceeded after {interruption_retries} retries"
+                        f"handler deadline exceeded after {interruption_retries} retries",
+                        partial_translation=completed_translation,
+                        remaining_chunk=active_chunk,
                     )
                 if last_exc is not None:
                     raise last_exc
                 raise StreamingDeadlineExceeded("handler deadline exceeded before any output")
 
             sent_any = False
+            sent_parts = []
 
             def on_delta(delta):
                 nonlocal sent_any, any_tokens_sent
                 sent_any = True
                 any_tokens_sent = True
+                sent_parts.append(delta)
                 self._send_sse_event("delta", {"delta": delta})
 
             try:
                 translated = translate_chunk_stream(
-                    client, chunk, index, total, previous,
+                    client, active_chunk, index, total, active_previous,
                     glossary=glossary, model=model, on_delta=on_delta,
                     deadline=deadline,
                 )
                 status = self._current_model_status(tier)
-                return translated, {
+                return join_translation_parts(completed_translation, str(translated)), {
                     "tier": tier,
                     "model": model,
                     "switchedModel": model != first_model,
@@ -1493,6 +1630,7 @@ class handler(BaseHTTPRequestHandler):
                     "modelOrder": models,
                     "exhaustedModels": status["exhaustedModels"],
                     "interruptionRetries": interruption_retries,
+                    "streamResumeCount": resume_count,
                 }
             except StreamingClientGoneError:
                 raise
@@ -1501,21 +1639,69 @@ class handler(BaseHTTPRequestHandler):
 
                 if sent_any:
                     if interruption_retries >= self.STREAM_INTERRUPTION_MAX_RETRIES:
-                        raise StreamingTranslationInterrupted(str(exc)) from exc
+                        raise StreamingTranslationInterrupted(
+                            str(exc),
+                            partial_translation=completed_translation,
+                            remaining_chunk=active_chunk,
+                        ) from exc
 
                     interruption_retries += 1
-                    try:
-                        self._send_sse_event("restart", {
-                            "reason": "stream_interrupted",
-                            "message": friendly_provider_error(exc),
-                            "failedModel": model,
-                            "attempt": interruption_retries,
-                            "maxAttempts": self.STREAM_INTERRUPTION_MAX_RETRIES,
-                            "errorType": type(exc).__name__,
-                            "errorDetail": str(exc)[:300],
-                        })
-                    except StreamingClientGoneError:
-                        raise
+                    streamed_text = "".join(sent_parts)
+                    resume_state = infer_stream_resume_state(active_chunk, streamed_text)
+
+                    if resume_state:
+                        completed_translation = join_translation_parts(
+                            completed_translation,
+                            resume_state["keptText"],
+                        )
+                        active_chunk = resume_state["remainingChunk"]
+                        active_previous = join_translation_parts(previous, completed_translation)
+                        resume_count += 1
+                        try:
+                            self._send_sse_event("replace", {
+                                "reason": "stream_resume",
+                                "text": completed_translation,
+                                "message": "流式中断，已删除最后未完成段落，并按非空段落数从该段重新续译",
+                                "failedModel": model,
+                                "attempt": interruption_retries,
+                                "maxAttempts": self.STREAM_INTERRUPTION_MAX_RETRIES,
+                                "completedParagraphs": resume_state["completedParagraphs"],
+                                "sourceParagraphs": resume_state["sourceParagraphs"],
+                                "outputParagraphs": resume_state["outputParagraphs"],
+                                "droppedOutputParagraphs": resume_state["droppedOutputParagraphs"],
+                                "errorType": type(exc).__name__,
+                                "errorDetail": str(exc)[:300],
+                            })
+                        except StreamingClientGoneError:
+                            raise
+                        if not active_chunk:
+                            status = self._current_model_status(tier)
+                            return completed_translation, {
+                                "tier": tier,
+                                "model": model,
+                                "switchedModel": model != first_model,
+                                "currentModel": status["model"],
+                                "modelOrder": models,
+                                "exhaustedModels": status["exhaustedModels"],
+                                "interruptionRetries": interruption_retries,
+                                "streamResumeCount": resume_count,
+                                "streamCompletedAfterInterrupt": True,
+                            }
+                    else:
+                        try:
+                            self._send_sse_event("replace", {
+                                "reason": "stream_interrupted",
+                                "text": completed_translation,
+                                "message": friendly_provider_error(exc),
+                                "failedModel": model,
+                                "attempt": interruption_retries,
+                                "maxAttempts": self.STREAM_INTERRUPTION_MAX_RETRIES,
+                                "errorType": type(exc).__name__,
+                                "errorDetail": str(exc)[:300],
+                            })
+                        except StreamingClientGoneError:
+                            raise
+
                     # 配额错误顺便标记耗尽，下次轮换跳过
                     if is_quota_error(exc):
                         self._mark_model_exhausted(tier, model)
@@ -1530,20 +1716,27 @@ class handler(BaseHTTPRequestHandler):
         # 所有模型都试过仍然失败
         if last_exc:
             if any_tokens_sent or interruption_retries > 0:
-                raise StreamingTranslationInterrupted(str(last_exc)) from last_exc
+                raise StreamingTranslationInterrupted(
+                    str(last_exc),
+                    partial_translation=completed_translation,
+                    remaining_chunk=active_chunk,
+                ) from last_exc
             raise last_exc
         raise RuntimeError("没有可用模型")
 
-    def _send_stream_fallback_result(self, translated, *, note, tier, model_session_id, meta=None):
+    def _send_stream_fallback_result(self, translated, *, note, tier, model_session_id, meta=None, prefix=""):
         """Emit the final delta + done events after stream phase gave up.
 
         Shared by the various exception branches in ``_handle_translate_stream``
         so the SSE shape stays consistent.
         """
-        self._send_sse_event("delta", {"delta": str(translated)})
+        translated = str(translated)
+        final_text = join_translation_parts(prefix, translated)
+        if translated:
+            self._send_sse_event("delta", {"delta": translated})
         done_payload = {
             "ok": True,
-            "translated": str(translated),
+            "translated": final_text,
             "note": note,
         }
         if meta:
@@ -1559,7 +1752,7 @@ class handler(BaseHTTPRequestHandler):
     def _stream_fallback_chain(
         self,
         client, chunk, index, total, previous, glossary,
-        tier, model_session_id, overall_deadline,
+        tier, model_session_id, overall_deadline, prefix="",
     ):
         """Run sensitive-model fallback then google fallback within budget.
 
@@ -1589,19 +1782,21 @@ class handler(BaseHTTPRequestHandler):
                         tier=tier,
                         model_session_id=model_session_id,
                         meta=meta,
+                        prefix=prefix,
                     )
                     return
                 except Exception:
                     pass  # fall through to google
 
         # Google fallback (last resort).
-        translated = translate_by_google_split_with_glossary(chunk, glossary or [])
+        translated = translate_by_google_split_with_glossary(chunk, glossary or [], deadline=overall_deadline)
         self._send_stream_fallback_result(
             translated,
             note="此 chunk 使用了机械翻译",
             tier=tier,
             model_session_id=model_session_id,
             meta=None,  # default → fallback=True, fallbackType=google
+            prefix=prefix,
         )
 
     def _handle_translate_stream(self, data):
@@ -1657,18 +1852,29 @@ class handler(BaseHTTPRequestHandler):
             return None
         except StreamingTranslationInterrupted as exc:
             # 流式翻译在多次切换模型后仍然中断（或 deadline 触发但已发过 delta）。
-            # 先通知前端清空累积，然后跑兜底链。
+            # 如果前面已经按段落保留了部分译文，只兜底剩余原文；否则清空当前累积后兜底整段。
+            prefix = getattr(exc, "partial_translation", "") or ""
+            remaining_chunk = getattr(exc, "remaining_chunk", "") or chunk
             try:
-                self._send_sse_event("restart", {
+                self._send_sse_event("replace", {
                     "reason": "stream_exhausted",
+                    "text": prefix,
                     "message": friendly_provider_error(exc),
                 })
             except StreamingClientGoneError:
                 return None
             try:
                 self._stream_fallback_chain(
-                    client, chunk, index, total, previous, glossary,
-                    tier, model_session_id, overall_deadline,
+                    client,
+                    remaining_chunk,
+                    index,
+                    total,
+                    join_translation_parts(previous, prefix),
+                    glossary,
+                    tier,
+                    model_session_id,
+                    overall_deadline,
+                    prefix=prefix,
                 )
             except StreamingClientGoneError:
                 return None
@@ -1822,6 +2028,7 @@ class handler(BaseHTTPRequestHandler):
                             glossary=glossary, model=model,
                             allow_google_fallback=False,
                             enable_internal_retry=False,
+                            deadline=non_stream_deadline,
                         ),
                         model_session_id=model_session_id,
                     )
@@ -1857,7 +2064,7 @@ class handler(BaseHTTPRequestHandler):
                         except Exception:
                             pass
 
-                    translated = translate_by_google_split_with_glossary(chunk, glossary or [])
+                    translated = translate_by_google_split_with_glossary(chunk, glossary or [], deadline=non_stream_deadline)
                     return self._send_json(200, {
                         "ok": True, "translated": str(translated), "fallback": True,
                         "fallbackType": "google",
@@ -1951,10 +2158,13 @@ class handler(BaseHTTPRequestHandler):
                         "exhaustedModels": status_info["exhaustedModels"],
                     }
                 else:
-                    # 旧 line-by-line 路径，保留原行为
+                    # 旧 line-by-line 路径，保留原行为，同时复用同一个全局 deadline。
+                    fix_deadline = time.monotonic() + FIX_HANDLER_BUDGET_SEC
                     fixed, meta = self._run_with_model_rotation(
                         tier,
-                        lambda model: fix_korean_text(client, translated_text, model=model),
+                        lambda model: fix_korean_text(
+                            client, translated_text, model=model, deadline=fix_deadline,
+                        ),
                         rotate_on_bad_request=True,
                         model_session_id=model_session_id,
                         allow_mt=False,
