@@ -107,6 +107,11 @@ async function trackGlossaryUsageEvent(eventType, stats) {
       },
     });
   } catch (err) {
+    const code = err?.apiError?.code;
+    if (code === "DATABASE_NOT_CONFIGURED") {
+      // 开发环境无 MongoDB 是正常情况，不打日志
+      return;
+    }
     console.info("track_event failed", err);
   }
 }

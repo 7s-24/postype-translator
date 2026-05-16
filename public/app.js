@@ -271,7 +271,8 @@ async function postJSON(body) {
   return data;
 }
 
-async function postJSONStream(body, onDelta) {
+async function postJSONStream(body, onDelta, callbacks = {}) {
+  const { onRestart, onMeta } = callbacks;
   const res = await fetch("/api/translate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -305,6 +306,11 @@ async function postJSONStream(body, onDelta) {
       donePayload = payload;
     } else if (currentEvent === "error") {
       throw makeApiError(payload.error, "STREAM_ERROR", "Streaming request failed");
+    } else if (currentEvent === "restart") {
+      // 后端在流式翻译中断、切换模型重试前发送，要求前端丢弃当前 chunk 的累积。
+      if (typeof onRestart === "function") onRestart(payload);
+    } else if (currentEvent === "meta") {
+      if (typeof onMeta === "function") onMeta(payload);
     }
 
     currentEvent = "message";
@@ -1083,13 +1089,14 @@ async function translateWithGlossary(glossary) {
   try {
     setProgress("准备翻译", 0, total);
     await loadModelOrderForCurrentSession(fast);
-  
+
     setProgress("翻译中", 0, total);
     const parts = new Array(total).fill("");
     const fallbackList = [];
     const sensitiveFallbackList = [];
     const googleFallbackList = [];
     const switchedModels = new Map();
+    const interruptedChunks = new Set();
 
     if (fast && total > 1) {
       // ── PARALLEL BATCH MODE ──
@@ -1144,19 +1151,38 @@ async function translateWithGlossary(glossary) {
         setProgress(`翻译第 ${i + 1}/${total} 段`, i, total);
 
         parts[i] = "";
-        const data = await postJSONStream({
-          action: "translate",
-          chunk: chunks[i],
-          index: i + 1,
-          total,
-          previous: prev,
-          glossary: clean,
-          fast: false,
-          modelSessionId: currentModelSessionId,
-        }, (delta) => {
-          parts[i] += delta;
-          $("output").value = parts.filter(Boolean).join("\n\n");
-        });
+        const data = await postJSONStream(
+          {
+            action: "translate",
+            chunk: chunks[i],
+            index: i + 1,
+            total,
+            previous: prev,
+            glossary: clean,
+            fast: false,
+            modelSessionId: currentModelSessionId,
+          },
+          (delta) => {
+            parts[i] += delta;
+            $("output").value = parts.filter(Boolean).join("\n\n");
+          },
+          {
+            // 后端在切换模型重试前会发 restart：清空当前 chunk 累积。
+            onRestart: (payload) => {
+              parts[i] = "";
+              $("output").value = parts.filter(Boolean).join("\n\n");
+              interruptedChunks.add(i + 1);
+              const attempt = payload?.attempt;
+              const maxAttempts = payload?.maxAttempts;
+              if (attempt && maxAttempts) {
+                setProgress(`翻译第 ${i + 1}/${total} 段（重试 ${attempt}/${maxAttempts}）`, i, total);
+              }
+            },
+            onMeta: (payload) => {
+              if (payload?.modelOrder) setModelOrderDisplay(payload);
+            },
+          }
+        );
 
         parts[i] = data.translated || parts[i];
         if (data.fallback) {
@@ -1180,6 +1206,9 @@ async function translateWithGlossary(glossary) {
     if (switchedModels.size) {
       console.info("Switched models:", Array.from(switchedModels.entries()));
       notices.push("部分段落已自动切换备用模型完成翻译。");
+    }
+    if (interruptedChunks.size) {
+      notices.push(`第 ${Array.from(interruptedChunks).sort((a,b) => a-b).join(", ")} 段流式中断后已切换模型重试`);
     }
     if (sensitiveFallbackList.length) {
       notices.push(`第 ${sensitiveFallbackList.join(", ")} 段已切换敏感内容兼容模型完成翻译`);
