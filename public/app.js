@@ -1329,10 +1329,7 @@ async function translateWithGlossary(glossary, options = {}) {
               const attempt = payload?.attempt;
               const maxAttempts = payload?.maxAttempts;
               if (attempt && maxAttempts) {
-                const doneParas = payload?.completedParagraphs;
-                const sourceParas = payload?.sourceParagraphs;
-                const suffix = doneParas && sourceParas ? `，已保留 ${doneParas}/${sourceParas} 小段，重译最后未完成小段` : "";
-                setProgress(`翻译第 ${i + 1}/${total} 段（续译 ${attempt}/${maxAttempts}${suffix}）`, i, total);
+                setProgress(`翻译第 ${i + 1}/${total} 段（正在努力获取译文）`, i, total);
               }
             },
             onMeta: (payload) => {
