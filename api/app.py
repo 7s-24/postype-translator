@@ -15,175 +15,30 @@ import urllib.parse
 
 from api.db import DatabaseNotConfigured, ValidationError
 from api.db_actions import build_db_write
-
-# ---------------------------------------------------------------------------
-# Models & config
-# ---------------------------------------------------------------------------
-STANDARD_MODELS = [
-    "qwen3-next-80b-a3b-instruct",
-    "qwen-plus-2025-09-11",
-    "qwen3-30b-a3b-instruct-2507",
-    "qwen-plus-2025-07-14",
-    "qwen3-235b-a22b-instruct-2507",
-    "deepseek-v3.2",
-    "qwen-plus-2025-04-28",
-    "qwen-plus-latest",
-    "qwen3-max-2026-01-23",
-    "qwen3-max",
-    "qwen3-max-2025-09-23",
-    "qwen3-32b",
-    "qwen3-235b-a22b",
-    # "qwen3-14b",
-    # "qwen3.6-35b-a3b",
-    # "qwen3.5-122b-a10b",
-    # "deepseek-v4-pro",
-    "qwen3-30b-a3b-thinking-2507",
-    "qwen3-235b-a22b-thinking-2507",
-    # "qwen3.5-35b-a3b",
-    # "qwen3-30b-a3b",
-    # "qwq-plus",
-    # "qwen3.5-27b",
-    # "qwen3.5-plus",
-    # "qwen3.6-plus",
-    # "qwen3.6-plus-2026-04-02",
-    # "qwen3.5-397b-a17b",
-    # "qwen3.5-plus-2026-02-15",
-    "qwen-vl-plus",
-    "qwen3-vl-plus",
-    "qwen3-vl-plus-2025-12-19",
-    "qwen3-vl-plus-2025-09-23",
-    "qwen3-vl-235b-a22b-instruct",
-    # "qwen3-vl-8b-thinking",
-    # "qwen3-vl-235b-a22b-thinking",
-]
-
-LIGHT_MODELS = [
-    "deepseek-v4-flash",
-    "qwen-flash-2025-07-28",
-    "qwen3-0.6b",
-    "qwen3-8b",
-    "qwen-mt-lite",
-    # "qwen3.6-flash-2026-04-16",
-    # "qwen3.6-flash",
-    # "qwen3.5-flash-2026-02-23",
-    # "qwen3.5-flash",
-]
-
-SENSITIVE_FALLBACK_MODELS = [
-    "qwen-mt-flash",
-    "qwen-mt-turbo",
-    "qwen-turbo",
-    "qwen-flash",
-    "qwen-vl-max",
-    "qwen-vl-plus",
-    "qwen3-vl-flash-2025-10-15",
-    "qwen3-vl-flash-2026-01-22",
-    "qwen3-vl-flash",
-    "qwen3-30b-a3b-instruct-2507",
-    "qwen3-next-80b-a3b-instruct",
-    # "qwen3-vl-235b-a22b-thinking",
-    "qwen3-vl-30b-a3b-instruct",
-    # "qwen3-vl-30b-a3b-thinking",
-    "qwen3-vl-8b-instruct",
-    # "qwen3.5-plus-2026-04-20",
-    # "qwen3.6-27b",
-    # "qwen3.6-max-preview",
-]
-
-# Backward-compatible defaults for callers/tests that pass a single model.
-MODEL_QUALITY = STANDARD_MODELS[0]
-MODEL_FAST    = LIGHT_MODELS[0]
-MAX_CHARS     = 3000          # bigger chunks → fewer API calls
-MODEL_STATE_FILE = os.getenv("MODEL_STATE_FILE", "/tmp/postype_translator_model_state.json")
-
-def env_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
-def env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed >= 0 else default
-
-
-# DashScope/OpenAI-compatible HTTP timeouts.  The defaults intentionally stay
-# well below Vercel's 300s runtime limit so a half-open provider connection can
-# fail into the existing model-rotation/fallback paths instead of exhausting the
-# whole serverless invocation.
-DASHSCOPE_CONNECT_TIMEOUT_SEC = env_float("DASHSCOPE_CONNECT_TIMEOUT_SEC", 10.0)
-DASHSCOPE_READ_TIMEOUT_SEC = env_float("DASHSCOPE_READ_TIMEOUT_SEC", 45.0)
-DASHSCOPE_WRITE_TIMEOUT_SEC = env_float("DASHSCOPE_WRITE_TIMEOUT_SEC", 10.0)
-DASHSCOPE_POOL_TIMEOUT_SEC = env_float("DASHSCOPE_POOL_TIMEOUT_SEC", 10.0)
-DASHSCOPE_MAX_RETRIES = env_int("DASHSCOPE_MAX_RETRIES", 0)
-
-# ---------------------------------------------------------------------------
-# Per-handler time budgets (within Vercel's 300s ceiling).
-#
-# Why: the streaming retry loop (up to STREAM_INTERRUPTION_MAX_RETRIES=6 reruns
-# at STREAM_TOTAL_TIMEOUT_SEC=90s) AND the synchronous fix loop (per-chunk fix
-# wrapped in outer model rotation that re-runs the whole batch on 400) can each
-# pile up well beyond 300s.  Per-attempt timeouts alone are not enough.
-#
-# Instead we attach a single monotonic deadline to the handler invocation and
-# thread it through every sub-step.  Each sub-step bails out cleanly when its
-# slice of the budget is gone, so the next layer (sensitive fallback → google)
-# always has time to actually run.
-# ---------------------------------------------------------------------------
-HANDLER_TOTAL_BUDGET_SEC = env_float("HANDLER_TOTAL_BUDGET_SEC", 270.0)
-STREAM_HANDLER_BUDGET_SEC = env_float("STREAM_HANDLER_BUDGET_SEC", 200.0)
-FIX_HANDLER_BUDGET_SEC = env_float("FIX_HANDLER_BUDGET_SEC", 240.0)
-SENSITIVE_FALLBACK_BUDGET_SEC = env_float("SENSITIVE_FALLBACK_BUDGET_SEC", 40.0)
-GOOGLE_RESERVE_SEC = env_float("GOOGLE_RESERVE_SEC", 30.0)
-
-
-def deadline_remaining(deadline):
-    if deadline is None:
-        return None
-    return deadline - time.monotonic()
-
-
-def deadline_exceeded(deadline):
-    return deadline is not None and time.monotonic() >= deadline
-
-
-ERROR_ACTION = "如果方便的话，可以复制以下的错误码，并描述错误产生的情况，提交给 fedrick1plela755@gmail.com 来帮助改进："
-
-ERRORS = {
-    "MISSING_BODY": "Missing body",
-    "MISSING_INPUT": "Missing URL or content",
-    "MISSING_CHUNK": "Missing chunk",
-    "MISSING_TRANSLATED_TEXT": "Missing translated_text",
-    "MISSING_API_KEY": "Server is missing DASHSCOPE_API_KEY",
-    "UNKNOWN_ACTION": "Unknown action",
-    "DATABASE_NOT_CONFIGURED": "Database is not configured",
-    "VALIDATION_ERROR": "Invalid database payload",
-    "RESTRICTED_POST_CONTENT": "这是付费/受限内容，请利用浏览器的阅读模式复制后手动输入，或通过浏览器保存 HTML（WebArchive 功能上线中）再重试翻译。",
-    "PROVIDER_BAD_REQUEST": "The selected model could not process this request",
-    "PROVIDER_UNAVAILABLE": "Translation service is temporarily unavailable",
-    "INTERNAL_ERROR": "Internal server error",
-}
-
-def error_response(code, status=400, message=None):
-    return status, {
-        "ok": False,
-        "error": {
-            "code": code,
-            "message": message or ERRORS.get(code, ERRORS["INTERNAL_ERROR"]),
-            "action": ERROR_ACTION,
-        },
-    }
+from api.errors import ERRORS, error_response
+from api.model_pools import (
+    LIGHT_MODELS,
+    MODEL_FAST,
+    MODEL_QUALITY,
+    SENSITIVE_FALLBACK_MODELS,
+    STANDARD_MODELS,
+)
+from api.runtime import (
+    DASHSCOPE_CONNECT_TIMEOUT_SEC,
+    DASHSCOPE_MAX_RETRIES,
+    DASHSCOPE_POOL_TIMEOUT_SEC,
+    DASHSCOPE_READ_TIMEOUT_SEC,
+    DASHSCOPE_WRITE_TIMEOUT_SEC,
+    FIX_HANDLER_BUDGET_SEC,
+    GOOGLE_RESERVE_SEC,
+    HANDLER_TOTAL_BUDGET_SEC,
+    MAX_CHARS,
+    MODEL_STATE_FILE,
+    SENSITIVE_FALLBACK_BUDGET_SEC,
+    STREAM_HANDLER_BUDGET_SEC,
+    deadline_exceeded,
+    deadline_remaining,
+)
 
 # ---------------------------------------------------------------------------
 # Model family detection
