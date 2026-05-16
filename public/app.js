@@ -190,7 +190,6 @@ function updateExtractButtonLabel() {
 function setBusy(busy) {
   $("btn-translate").disabled = busy;
   $("btn-direct-translate").disabled = busy;
-  $("btn-download").disabled = busy;
   if ($("btn-submit-glossary")) $("btn-submit-glossary").disabled = busy;
   if ($("btn-submit-terms")) $("btn-submit-terms").disabled = busy;
   $("file-html").disabled = busy;
@@ -199,9 +198,15 @@ function setBusy(busy) {
   $("fast-mode").disabled = busy;
 
   if (busy) {
-    $("btn-translate").textContent = "处理中…";
+    $("btn-translate").disabled = false;
+    $("btn-direct-translate").disabled = false;
+    $("btn-translate").textContent = "重新提取术语";
+    $("btn-direct-translate").textContent = "重新直接翻译";
   } else {
+    $("btn-translate").disabled = false;
+    $("btn-direct-translate").disabled = false;
     updateExtractButtonLabel();
+    $("btn-direct-translate").textContent = "直接翻译";
   }
 }
 
@@ -254,11 +259,12 @@ function makeApiError(error, fallbackCode, fallbackMessage) {
   return err;
 }
 
-async function postJSON(body) {
+async function postJSON(body, options = {}) {
   const res = await fetch("/api/translate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal: options.signal,
   });
   const data = await res.json().catch(() => ({}));
   const fallbackCode = res.ok ? "API_ERROR" : `HTTP_${res.status}`;
@@ -272,11 +278,12 @@ async function postJSON(body) {
 }
 
 async function postJSONStream(body, onDelta, callbacks = {}) {
-  const { onRestart, onMeta } = callbacks;
+  const { onRestart, onMeta, signal } = callbacks;
   const res = await fetch("/api/translate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...body, stream: true }),
+    signal,
   });
 
   if (!res.ok || !res.body) {
@@ -685,6 +692,8 @@ $("glossary-toggle").addEventListener("click", () => {
 let pendingChunks = [];
 let mergedGlossary = [];
 let currentModelSessionId = "";
+let currentAbortController = null;
+let currentRunId = 0;
 let currentModelOrder = [];
 
 function createModelSessionId() {
@@ -714,13 +723,23 @@ function setModelOrderDisplay(status) {
   el.classList.add("active");
 }
 
-async function loadModelOrderForCurrentSession(fast) {
+function isCurrentRun(runId) {
+  return runId === currentRunId;
+}
+
+function isAbortError(err) {
+  return err?.name === "AbortError";
+}
+
+async function loadModelOrderForCurrentSession(fast, options = {}) {
+  const { runId = currentRunId, signal } = options;
   if (!currentModelSessionId) currentModelSessionId = createModelSessionId();
   const status = await postJSON({
     action: "model_status",
     fast,
     modelSessionId: currentModelSessionId,
-  });
+  }, { signal });
+  if (!isCurrentRun(runId)) return [];
   setModelOrderDisplay(status);
   return status.modelOrder || [];
 }
@@ -979,6 +998,16 @@ function hideTermsReview() {
 // Phase 1: Prepare + Extract
 async function prepareAndExtract(options = {}) {
   const { skipTermExtraction = false } = options;
+
+  if (currentAbortController) {
+    currentAbortController.abort();
+  }
+
+  currentAbortController = new AbortController();
+  const runId = currentRunId + 1;
+  currentRunId = runId;
+  const signal = currentAbortController.signal;
+
   const url = $("url").value.trim();
   const manual = $("manual-html").value.trim();
   const fileInput = $("file-html");
@@ -1009,29 +1038,34 @@ async function prepareAndExtract(options = {}) {
   $("progress").classList.add("active");
   setBusy(true);
   await beginProcessingWakeLock();
+  if (!isCurrentRun(runId)) return;
 
   try {
-    await loadModelOrderForCurrentSession(isFast());
+    await loadModelOrderForCurrentSession(isFast(), { runId, signal });
+    if (!isCurrentRun(runId)) return;
 
     let prep;
 
     if (file) {
       setProgress("解析文件", 0, 1);
-      prep = await postJSON({ action: "prepare", fileData: await readFile(file) });
+      const fileData = await readFile(file);
+      if (!isCurrentRun(runId)) return;
+      prep = await postJSON({ action: "prepare", fileData }, { signal });
     } else if (manual) {
       setProgress("处理文本", 0, 1);
-      prep = await postJSON({ action: "prepare", text: manual });
+      prep = await postJSON({ action: "prepare", text: manual }, { signal });
     } else {
       setProgress("获取网页", 0, 1);
-      prep = await postJSON({ action: "prepare", url });
+      prep = await postJSON({ action: "prepare", url }, { signal });
     }
+    if (!isCurrentRun(runId)) return;
 
     const chunks = prep.chunks || [];
     if (!chunks.length) throw new Error("正文为空");
     pendingChunks = chunks;
 
     if (skipTermExtraction) {
-      await translateWithGlossary(getGlossary().map(g => ({ ...g, _src:"global" })));
+      await translateWithGlossary(getGlossary().map(g => ({ ...g, _src:"global" })), { runId, signal });
       return;
     }
 
@@ -1040,7 +1074,9 @@ async function prepareAndExtract(options = {}) {
       action: "extract_terms",
       text: chunks.join("\n\n"),
       modelSessionId: currentModelSessionId,
-    });
+    }, { signal });
+    if (!isCurrentRun(runId)) return;
+
     setModelOrderDisplay(ext);
     const articleTerms = ext.terms || [];
 
@@ -1055,6 +1091,7 @@ async function prepareAndExtract(options = {}) {
         : `未检测到新术语（共 ${chunks.length} 段），将使用全局术语库。请确认后开始翻译。`
     );
   } catch (err) {
+    if (!isCurrentRun(runId) || isAbortError(err)) return;
     showError(err);
     $("progress-label").textContent = "失败";
     setBusy(false);
@@ -1063,7 +1100,11 @@ async function prepareAndExtract(options = {}) {
 }
 
 // Phase 2: Translate
-async function translateWithGlossary(glossary) {
+async function translateWithGlossary(glossary, options = {}) {
+  const runId = options.runId ?? currentRunId;
+  const signal = options.signal ?? currentAbortController?.signal;
+  if (!isCurrentRun(runId)) return;
+
   hideTermsReview();
   clearError();
   clearNotice();
@@ -1071,6 +1112,7 @@ async function translateWithGlossary(glossary) {
   $("progress").classList.add("active");
   setBusy(true);
   await beginProcessingWakeLock();
+  if (!isCurrentRun(runId)) return;
 
   const chunks = pendingChunks;
   const total = chunks.length;
@@ -1088,7 +1130,8 @@ async function translateWithGlossary(glossary) {
 
   try {
     setProgress("准备翻译", 0, total);
-    await loadModelOrderForCurrentSession(fast);
+    await loadModelOrderForCurrentSession(fast, { runId, signal });
+    if (!isCurrentRun(runId)) return;
 
     setProgress("翻译中", 0, total);
     const parts = new Array(total).fill("");
@@ -1103,6 +1146,7 @@ async function translateWithGlossary(glossary) {
       let lastPrev = "";
 
       for (let start = 0; start < total; start += BATCH_SIZE) {
+        if (!isCurrentRun(runId)) return;
         const end = Math.min(start + BATCH_SIZE, total);
         setProgress(`翻译第 ${start + 1}–${end}/${total} 段`, start, total);
 
@@ -1119,11 +1163,12 @@ async function translateWithGlossary(glossary) {
               glossary: clean,
               fast: true,
               modelSessionId: currentModelSessionId,
-            })
+            }, { signal })
           );
         }
 
         const results = await Promise.all(promises);
+        if (!isCurrentRun(runId)) return;
 
         for (let j = 0; j < results.length; j++) {
           const idx = start + j;
@@ -1147,6 +1192,7 @@ async function translateWithGlossary(glossary) {
     } else {
       // ── SEQUENTIAL MODE ──
       for (let i = 0; i < total; i++) {
+        if (!isCurrentRun(runId)) return;
         const prev = i > 0 ? parts[i - 1] : "";
         setProgress(`翻译第 ${i + 1}/${total} 段`, i, total);
 
@@ -1163,12 +1209,15 @@ async function translateWithGlossary(glossary) {
             modelSessionId: currentModelSessionId,
           },
           (delta) => {
+            if (!isCurrentRun(runId)) return;
             parts[i] += delta;
             $("output").value = parts.filter(Boolean).join("\n\n");
           },
           {
+            signal,
             // 后端在切换模型重试前会发 restart：清空当前 chunk 累积。
             onRestart: (payload) => {
+              if (!isCurrentRun(runId)) return;
               parts[i] = "";
               $("output").value = parts.filter(Boolean).join("\n\n");
               interruptedChunks.add(i + 1);
@@ -1190,10 +1239,12 @@ async function translateWithGlossary(glossary) {
               }
             },
             onMeta: (payload) => {
+              if (!isCurrentRun(runId)) return;
               if (payload?.modelOrder) setModelOrderDisplay(payload);
             },
           }
         );
+        if (!isCurrentRun(runId)) return;
 
         parts[i] = data.translated || parts[i];
         if (data.fallback) {
@@ -1211,6 +1262,7 @@ async function translateWithGlossary(glossary) {
       }
     }
 
+    if (!isCurrentRun(runId)) return;
     setProgress("完成", total, total);
 
     const notices = [];
@@ -1248,6 +1300,7 @@ async function translateWithGlossary(glossary) {
           : "检测到备选翻译段落，正在复核术语和人称…"
       );
 
+      const skipFixIndices = googleFallbackList.slice();
       const fix = await postJSON({
         action: "fix",
         translated_text: text,
@@ -1255,10 +1308,12 @@ async function translateWithGlossary(glossary) {
         source_chunks: chunks,
         fallback_indices: fallbackList,
         google_fallback_indices: googleFallbackList,
+        skip_fix_indices: skipFixIndices,
         glossary: clean,
         fast,
         modelSessionId: currentModelSessionId,
-      });
+      }, { signal });
+      if (!isCurrentRun(runId)) return;
 
       if (fix.modelOrder) setModelOrderDisplay(fix);
 
@@ -1267,11 +1322,14 @@ async function translateWithGlossary(glossary) {
         $("output").value = text;
       }
 
-      showNotice(
-        containsKorean(text)
-          ? "修正已尝试，仍检测到韩文字符，请手动检查。"
-          : "已完成译文问题复核，请检查术语和人称是否符合原文。"
-      );
+      const skippedFixIndices = Array.isArray(fix.skippedFixIndices) ? fix.skippedFixIndices : [];
+      const skippedFixNotice = fix.skipped && skippedFixIndices.length
+        ? `第 ${skippedFixIndices.join(", ")} 段机械翻译已跳过模型复核，并保留原文供人工检查。`
+        : "";
+      const reviewNotice = containsKorean(text)
+        ? "修正已尝试，仍检测到韩文字符，请手动检查。"
+        : "已完成译文问题复核，请检查术语和人称是否符合原文。";
+      showNotice([reviewNotice, skippedFixNotice].filter(Boolean).join("\n"));
     }
 
     void trackGlossaryUsageEvent("glossary_translate_completed", {
@@ -1280,6 +1338,7 @@ async function translateWithGlossary(glossary) {
       ok: true,
     });
   } catch (err) {
+    if (!isCurrentRun(runId) || isAbortError(err)) return;
     void trackGlossaryUsageEvent("glossary_translate_failed", {
       ...usageStats,
       durationMs: Date.now() - startedAt,
@@ -1288,8 +1347,11 @@ async function translateWithGlossary(glossary) {
     showError(err);
     $("progress-label").textContent = "失败";
   } finally {
-    setBusy(false);
-    await endProcessingWakeLock();
+    if (isCurrentRun(runId)) {
+      setBusy(false);
+      await endProcessingWakeLock();
+      if (currentAbortController?.signal === signal) currentAbortController = null;
+    }
   }
 }
 

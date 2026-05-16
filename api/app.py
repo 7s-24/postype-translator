@@ -1,5 +1,6 @@
 from http.server import BaseHTTPRequestHandler
 from openai import OpenAI
+import httpx
 from bs4 import BeautifulSoup
 import requests
 import json
@@ -32,16 +33,16 @@ STANDARD_MODELS = [
     "qwen3-max-2025-09-23",
     "qwen3-32b",
     "qwen3-235b-a22b",
-    "qwen3-14b",
-    "qwen3.6-35b-a3b",
-    "qwen3.5-122b-a10b",
-    "deepseek-v4-pro",
+    # "qwen3-14b",
+    # "qwen3.6-35b-a3b",
+    # "qwen3.5-122b-a10b",
+    # "deepseek-v4-pro",
     "qwen3-30b-a3b-thinking-2507",
     "qwen3-235b-a22b-thinking-2507",
-    "qwen3.5-35b-a3b",
-    "qwen3-30b-a3b",
-    "qwq-plus",
-    "qwen3.5-27b",
+    # "qwen3.5-35b-a3b",
+    # "qwen3-30b-a3b",
+    # "qwq-plus",
+    # "qwen3.5-27b",
     # "qwen3.5-plus",
     # "qwen3.6-plus",
     # "qwen3.6-plus-2026-04-02",
@@ -52,8 +53,8 @@ STANDARD_MODELS = [
     "qwen3-vl-plus-2025-12-19",
     "qwen3-vl-plus-2025-09-23",
     "qwen3-vl-235b-a22b-instruct",
-    "qwen3-vl-8b-thinking",
-    "qwen3-vl-235b-a22b-thinking",
+    # "qwen3-vl-8b-thinking",
+    # "qwen3-vl-235b-a22b-thinking",
 ]
 
 LIGHT_MODELS = [
@@ -62,9 +63,9 @@ LIGHT_MODELS = [
     "qwen3-0.6b",
     "qwen3-8b",
     "qwen-mt-lite",
-    "qwen3.6-flash-2026-04-16",
-    "qwen3.6-flash",
-    "qwen3.5-flash-2026-02-23",
+    # "qwen3.6-flash-2026-04-16",
+    # "qwen3.6-flash",
+    # "qwen3.5-flash-2026-02-23",
     # "qwen3.5-flash",
 ]
 
@@ -80,9 +81,9 @@ SENSITIVE_FALLBACK_MODELS = [
     "qwen3-vl-flash",
     "qwen3-30b-a3b-instruct-2507",
     "qwen3-next-80b-a3b-instruct",
-    "qwen3-vl-235b-a22b-thinking",
+    # "qwen3-vl-235b-a22b-thinking",
     "qwen3-vl-30b-a3b-instruct",
-    "qwen3-vl-30b-a3b-thinking",
+    # "qwen3-vl-30b-a3b-thinking",
     "qwen3-vl-8b-instruct",
     # "qwen3.5-plus-2026-04-20",
     # "qwen3.6-27b",
@@ -94,6 +95,38 @@ MODEL_QUALITY = STANDARD_MODELS[0]
 MODEL_FAST    = LIGHT_MODELS[0]
 MAX_CHARS     = 3000          # bigger chunks → fewer API calls
 MODEL_STATE_FILE = os.getenv("MODEL_STATE_FILE", "/tmp/postype_translator_model_state.json")
+
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+# DashScope/OpenAI-compatible HTTP timeouts.  The defaults intentionally stay
+# well below Vercel's 300s runtime limit so a half-open provider connection can
+# fail into the existing model-rotation/fallback paths instead of exhausting the
+# whole serverless invocation.
+DASHSCOPE_CONNECT_TIMEOUT_SEC = env_float("DASHSCOPE_CONNECT_TIMEOUT_SEC", 10.0)
+DASHSCOPE_READ_TIMEOUT_SEC = env_float("DASHSCOPE_READ_TIMEOUT_SEC", 45.0)
+DASHSCOPE_WRITE_TIMEOUT_SEC = env_float("DASHSCOPE_WRITE_TIMEOUT_SEC", 10.0)
+DASHSCOPE_POOL_TIMEOUT_SEC = env_float("DASHSCOPE_POOL_TIMEOUT_SEC", 10.0)
+DASHSCOPE_MAX_RETRIES = env_int("DASHSCOPE_MAX_RETRIES", 0)
 
 ERROR_ACTION = "如果方便的话，可以复制以下的错误码，并描述错误产生的情况，提交给 fedrick1plela755@gmail.com 来帮助改进："
 
@@ -1108,21 +1141,27 @@ def fix_translated_chunks(
     translated_chunks,
     fallback_indices=None,
     google_fallback_indices=None,
+    skip_fix_indices=None,
     glossary=None,
     model=MODEL_QUALITY,
 ):
     fallback_set = set(fallback_indices or [])
     google_fallback_set = set(google_fallback_indices or [])
+    skip_fix_set = set(skip_fix_indices or [])
     fixed = list(translated_chunks)
     total = len(fixed)
 
     for idx, translated in enumerate(translated_chunks):
         chunk_no = idx + 1
+        source = source_chunks[idx] if idx < len(source_chunks) else ""
+        if chunk_no in skip_fix_set:
+            if chunk_no in google_fallback_set:
+                fixed[idx] = format_google_fallback_with_source(translated, source)
+            continue
+
         used_fallback = chunk_no in fallback_set
         if not contains_korean(translated) and not used_fallback:
             continue
-
-        source = source_chunks[idx] if idx < len(source_chunks) else ""
         previous_translation = fixed[idx - 1] if idx > 0 else ""
         next_translation = translated_chunks[idx + 1] if idx < total - 1 else ""
         try:
@@ -1228,6 +1267,13 @@ class handler(BaseHTTPRequestHandler):
         return OpenAI(
             base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
             api_key=api_key,
+            timeout=httpx.Timeout(
+                connect=DASHSCOPE_CONNECT_TIMEOUT_SEC,
+                read=DASHSCOPE_READ_TIMEOUT_SEC,
+                write=DASHSCOPE_WRITE_TIMEOUT_SEC,
+                pool=DASHSCOPE_POOL_TIMEOUT_SEC,
+            ),
+            max_retries=DASHSCOPE_MAX_RETRIES,
         )
 
     def _tier_name(self, data):
@@ -1726,11 +1772,30 @@ class handler(BaseHTTPRequestHandler):
                 translated_chunks = data.get("translated_chunks", [])
                 fallback_indices = data.get("fallback_indices", [])
                 google_fallback_indices = data.get("google_fallback_indices", [])
+                skip_fix_indices = data.get("skip_fix_indices", [])
                 glossary = data.get("glossary", [])
-                if not isinstance(fallback_indices, list):
-                    fallback_indices = []
-                if not isinstance(google_fallback_indices, list):
-                    google_fallback_indices = []
+
+                def parse_index_set(value):
+                    if not isinstance(value, list):
+                        return set()
+                    index_set = set()
+                    for item in value:
+                        if isinstance(item, bool):
+                            continue
+                        if isinstance(item, int):
+                            if item > 0:
+                                index_set.add(item)
+                            continue
+                        if isinstance(item, str):
+                            stripped = item.strip()
+                            if stripped.isdigit():
+                                index_set.add(int(stripped))
+                    return index_set
+
+                fallback_index_set = parse_index_set(fallback_indices)
+                google_fallback_index_set = parse_index_set(google_fallback_indices)
+                skip_fix_index_set = parse_index_set(skip_fix_indices)
+                skipped_fix_indices = sorted(skip_fix_index_set)
 
                 # fix 任务需要 system prompt + 复杂判断，mt 模型不能用
                 if isinstance(source_chunks, list) and isinstance(translated_chunks, list) and translated_chunks:
@@ -1740,8 +1805,9 @@ class handler(BaseHTTPRequestHandler):
                             client,
                             [str(chunk) for chunk in source_chunks],
                             [str(chunk) for chunk in translated_chunks],
-                            fallback_indices=[int(i) for i in fallback_indices if str(i).isdigit()],
-                            google_fallback_indices=[int(i) for i in google_fallback_indices if str(i).isdigit()],
+                            fallback_indices=fallback_index_set,
+                            google_fallback_indices=google_fallback_index_set,
+                            skip_fix_indices=skip_fix_index_set,
                             glossary=glossary,
                             model=model,
                         ),
@@ -1757,7 +1823,13 @@ class handler(BaseHTTPRequestHandler):
                         model_session_id=model_session_id,
                         allow_mt=False,
                     )
-                return self._send_json(200, {"ok": True, "fixed_text": fixed, **meta})
+                return self._send_json(200, {
+                    "ok": True,
+                    "fixed_text": fixed,
+                    "skipped": bool(skipped_fix_indices),
+                    "skippedFixIndices": skipped_fix_indices,
+                    **meta,
+                })
 
             status, payload = error_response("UNKNOWN_ACTION", 400)
             self._send_json(status, payload)
