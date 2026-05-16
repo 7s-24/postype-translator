@@ -159,11 +159,6 @@ NO_THINK_SUFFIX = "\n\n/no_think"
 
 
 def build_chat_messages(system_prompt: str, user_prompt: str, model: str) -> list:
-    """普通 chat 模型的消息构造。
-
-    Qwen-MT 模型不应走这里——它们必须走 build_qwen_mt_request。
-    若误调用，这里只做兜底（去掉 system，避免 translation_options 失效）。
-    """
     if is_qwen_mt_model(model):
         return [{"role": "user", "content": user_prompt}]
 
@@ -176,9 +171,6 @@ def build_chat_messages(system_prompt: str, user_prompt: str, model: str) -> lis
 
 def build_qwen_mt_request(chunk: str, glossary: list = None) -> dict:
     """构造 Qwen-MT 专用的请求参数。
-
-    返回值可直接 **kwargs 解包到 client.chat.completions.create。
-    不包含 model 字段，调用方自行传入。
     """
     translation_options = {
         "source_lang": "Korean",
@@ -1052,7 +1044,7 @@ def fix_translation_chunk(
         raise RuntimeError(f"fix_translation_chunk 不支持 Qwen-MT 模型: {model}")
     glossary_section = build_glossary_prompt_section(glossary, chunk=source_text) if glossary else ""
     fallback_note = (
-        "本段经谷歌兜底，重点核对人称/称呼/主语。"
+        "本段经机翻兜底，重点核对人称/称呼/主语。"
         if used_fallback else
         "本段未必经过机翻；无明确错误时保持原样。"
     )
@@ -1105,9 +1097,9 @@ def fix_fallback_names_and_subjects_chunk(
 def format_google_fallback_with_source(translated_text: str, source_text: str) -> str:
     translated_text = (translated_text or "").rstrip()
     source_text = (source_text or "").strip()
-    if not source_text or "【Google 备选翻译原文】" in translated_text:
+    if not source_text or "【机器翻译原文】" in translated_text:
         return translated_text
-    return f"{translated_text}\n\n【Google 备选翻译原文】\n{source_text}"
+    return f"{translated_text}\n\n【机器翻译原文】\n{source_text}"
 
 
 def fix_translated_chunks(
@@ -1381,9 +1373,7 @@ class handler(BaseHTTPRequestHandler):
             raise last_exc
         raise RuntimeError("没有可用模型")
 
-    # 流式翻译被中断后，最多尝试切换的模型数量。
-    # 防止个别 chunk 在多个模型上反复中断导致请求时间爆炸。
-    STREAM_INTERRUPTION_MAX_RETRIES = 2
+    STREAM_INTERRUPTION_MAX_RETRIES = 6
 
     def _stream_with_model_rotation(
         self,
@@ -1425,14 +1415,11 @@ class handler(BaseHTTPRequestHandler):
                     "interruptionRetries": interruption_retries,
                 }
             except StreamingClientGoneError:
-                # 客户端已经走了，没必要继续翻译
                 raise
             except Exception as exc:
                 last_exc = exc
 
                 if sent_any:
-                    # 已经向前端发过 delta：通知客户端丢弃当前 chunk 的累积，
-                    # 然后切下一个模型从头重试。
                     if interruption_retries >= self.STREAM_INTERRUPTION_MAX_RETRIES:
                         raise StreamingTranslationInterrupted(str(exc)) from exc
 
@@ -1444,7 +1431,6 @@ class handler(BaseHTTPRequestHandler):
                             "failedModel": model,
                             "attempt": interruption_retries,
                             "maxAttempts": self.STREAM_INTERRUPTION_MAX_RETRIES,
-                            # 诊断信息：异常类型 + 异常字符串（便于线上排查）
                             "errorType": type(exc).__name__,
                             "errorDetail": str(exc)[:300],
                         })
