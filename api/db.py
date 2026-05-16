@@ -74,6 +74,12 @@ def _serialize_value(value):
     return value
 
 
+
+def _compact(document):
+    """Return a shallow copy without keys whose value is None."""
+    return {key: value for key, value in document.items() if value is not None}
+
+
 def _serialize_document(document):
     if not document:
         return document
@@ -126,7 +132,7 @@ def sanitize_site_like(payload):
         "userId": _require_string(payload, "userId", 120, required=False),
         "delta": delta,
     }
-    return {k: v for k, v in sanitized.items() if v is not None}
+    return _compact(sanitized)
 
 
 def save_site_like(payload):
@@ -163,7 +169,7 @@ def sanitize_glossary_entry(payload):
         "note": _require_string(payload, "note", 500, required=False),
         "source": _require_string(payload, "source", 120, required=False),
     }
-    return {k: v for k, v in sanitized.items() if v is not None}
+    return _compact(sanitized)
 
 
 def _sanitize_entries(entries, *, max_entries=1000):
@@ -190,7 +196,7 @@ def sanitize_glossary_upload(payload):
     }
     if sanitized.get("sourceUrl"):
         sanitized["sourceUrl"] = _normalize_url(sanitized["sourceUrl"])
-    return {k: v for k, v in sanitized.items() if v is not None}
+    return _compact(sanitized)
 
 
 def save_glossary_upload(payload):
@@ -220,7 +226,7 @@ def save_glossary_entries(entries, context=None):
     }
     if shared.get("sourceUrl"):
         shared["sourceUrl"] = _normalize_url(shared["sourceUrl"])
-    shared = {k: v for k, v in shared.items() if v is not None}
+    shared = _compact(shared)
     docs = [{**entry, **shared} for entry in sanitized_entries]
     result = get_collection("glossary_entries").insert_many(docs)
     for doc, inserted_id in zip(docs, result.inserted_ids):
@@ -293,7 +299,7 @@ def sanitize_event(payload):
     }
     if sanitized.get("pageUrl"):
         sanitized["pageUrl"] = _normalize_url(sanitized["pageUrl"])
-    return {k: v for k, v in sanitized.items() if v is not None}
+    return _compact(sanitized)
 
 
 def save_event(payload):
