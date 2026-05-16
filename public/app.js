@@ -1248,6 +1248,7 @@ async function translateWithGlossary(glossary) {
           : "检测到备选翻译段落，正在复核术语和人称…"
       );
 
+      const skipFixIndices = googleFallbackList.slice();
       const fix = await postJSON({
         action: "fix",
         translated_text: text,
@@ -1255,6 +1256,7 @@ async function translateWithGlossary(glossary) {
         source_chunks: chunks,
         fallback_indices: fallbackList,
         google_fallback_indices: googleFallbackList,
+        skip_fix_indices: skipFixIndices,
         glossary: clean,
         fast,
         modelSessionId: currentModelSessionId,
@@ -1267,11 +1269,14 @@ async function translateWithGlossary(glossary) {
         $("output").value = text;
       }
 
-      showNotice(
-        containsKorean(text)
-          ? "修正已尝试，仍检测到韩文字符，请手动检查。"
-          : "已完成译文问题复核，请检查术语和人称是否符合原文。"
-      );
+      const skippedFixIndices = Array.isArray(fix.skippedFixIndices) ? fix.skippedFixIndices : [];
+      const skippedFixNotice = fix.skipped && skippedFixIndices.length
+        ? `第 ${skippedFixIndices.join(", ")} 段机械翻译已跳过模型复核，并保留原文供人工检查。`
+        : "";
+      const reviewNotice = containsKorean(text)
+        ? "修正已尝试，仍检测到韩文字符，请手动检查。"
+        : "已完成译文问题复核，请检查术语和人称是否符合原文。";
+      showNotice([reviewNotice, skippedFixNotice].filter(Boolean).join("\n"));
     }
 
     void trackGlossaryUsageEvent("glossary_translate_completed", {
