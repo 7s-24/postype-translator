@@ -97,6 +97,9 @@ function buildGlossaryUsageStats(glossary, clean, extra = {}) {
   };
 }
 
+// 埋点是 fire-and-forget：所有调用方都用 void 包装，不会阻塞翻译主流程。
+// 这里 try/catch 只是为了避免 unhandled promise rejection；
+// DATABASE_NOT_CONFIGURED 在开发环境是预期状态，静默处理，避免 console 噪音。
 async function trackGlossaryUsageEvent(eventType, stats) {
   try {
     await postJSON({
@@ -107,6 +110,11 @@ async function trackGlossaryUsageEvent(eventType, stats) {
       },
     });
   } catch (err) {
+    const code = err?.apiError?.code;
+    if (code === "DATABASE_NOT_CONFIGURED") {
+      // 开发环境无 MongoDB 是正常情况，不打日志
+      return;
+    }
     console.info("track_event failed", err);
   }
 }
