@@ -271,6 +271,78 @@ async function postJSON(body) {
   return data;
 }
 
+async function postJSONStream(body, onDelta) {
+  const res = await fetch("/api/translate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, stream: true }),
+  });
+
+  if (!res.ok || !res.body) {
+    const data = await res.json().catch(() => ({}));
+    throw makeApiError(data.error, `HTTP_${res.status}`, `Request failed (HTTP ${res.status})`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let currentEvent = "message";
+  let currentData = [];
+  let donePayload = null;
+
+  const dispatchEvent = () => {
+    if (!currentData.length) {
+      currentEvent = "message";
+      return;
+    }
+
+    const raw = currentData.join("\n");
+    const payload = raw ? JSON.parse(raw) : {};
+
+    if (currentEvent === "delta") {
+      onDelta(payload.delta || "");
+    } else if (currentEvent === "done") {
+      donePayload = payload;
+    } else if (currentEvent === "error") {
+      throw makeApiError(payload.error, "STREAM_ERROR", "Streaming request failed");
+    }
+
+    currentEvent = "message";
+    currentData = [];
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line) {
+        dispatchEvent();
+      } else if (line.startsWith("event:")) {
+        currentEvent = line.slice(6).trim() || "message";
+      } else if (line.startsWith("data:")) {
+        currentData.push(line.slice(5).replace(/^ /, ""));
+      }
+    }
+
+    if (done) break;
+  }
+
+  if (buffer) {
+    if (buffer.startsWith("data:")) currentData.push(buffer.slice(5).replace(/^ /, ""));
+    else if (buffer.startsWith("event:")) currentEvent = buffer.slice(6).trim() || "message";
+  }
+  dispatchEvent();
+
+  if (!donePayload || donePayload.ok === false || donePayload.error) {
+    throw makeApiError(donePayload?.error, "STREAM_ERROR", "Streaming request failed");
+  }
+
+  return donePayload;
+}
+
 function catOptions(sel) {
   return CATEGORIES.map(c => `<option value="${c}"${c===sel?" selected":""}>${c}</option>`).join("");
 }
@@ -1000,6 +1072,13 @@ async function translateWithGlossary(glossary) {
   const clean = glossary
     .filter(g => g.ko && g.zh)
     .map(g => ({ ko:g.ko, zh:g.zh, category:g.category }));
+  const startedAt = Date.now();
+  const usageStats = buildGlossaryUsageStats(glossary, clean, {
+    tier: fast ? "light" : "standard",
+    chunkCount: total,
+  });
+
+  void trackGlossaryUsageEvent("glossary_translate_started", usageStats);
 
   try {
     setProgress("准备翻译", 0, total);
@@ -1008,6 +1087,8 @@ async function translateWithGlossary(glossary) {
     setProgress("翻译中", 0, total);
     const parts = new Array(total).fill("");
     const fallbackList = [];
+    const sensitiveFallbackList = [];
+    const googleFallbackList = [];
     const switchedModels = new Map();
 
     if (fast && total > 1) {
@@ -1040,7 +1121,14 @@ async function translateWithGlossary(glossary) {
         for (let j = 0; j < results.length; j++) {
           const idx = start + j;
           parts[idx] = results[j].translated || "";
-          if (results[j].fallback) fallbackList.push(idx + 1);
+          if (results[j].fallback) {
+            fallbackList.push(idx + 1);
+            if (results[j].fallbackType === "sensitive_model") {
+              sensitiveFallbackList.push(idx + 1);
+            } else if (results[j].fallbackType === "google") {
+              googleFallbackList.push(idx + 1);
+            }
+          }
           if (results[j].modelOrder) setModelOrderDisplay(results[j]);
           if (results[j].switchedModel && results[j].model) switchedModels.set(idx + 1, results[j].model);
         }
@@ -1055,7 +1143,8 @@ async function translateWithGlossary(glossary) {
         const prev = i > 0 ? parts[i - 1] : "";
         setProgress(`翻译第 ${i + 1}/${total} 段`, i, total);
 
-        const data = await postJSON({
+        parts[i] = "";
+        const data = await postJSONStream({
           action: "translate",
           chunk: chunks[i],
           index: i + 1,
@@ -1064,10 +1153,20 @@ async function translateWithGlossary(glossary) {
           glossary: clean,
           fast: false,
           modelSessionId: currentModelSessionId,
+        }, (delta) => {
+          parts[i] += delta;
+          $("output").value = parts.filter(Boolean).join("\n\n");
         });
 
-        parts[i] = data.translated || "";
-        if (data.fallback) fallbackList.push(i + 1);
+        parts[i] = data.translated || parts[i];
+        if (data.fallback) {
+          fallbackList.push(i + 1);
+          if (data.fallbackType === "sensitive_model") {
+            sensitiveFallbackList.push(i + 1);
+          } else if (data.fallbackType === "google") {
+            googleFallbackList.push(i + 1);
+          }
+        }
         if (data.modelOrder) setModelOrderDisplay(data);
         if (data.switchedModel && data.model) switchedModels.set(i + 1, data.model);
         $("output").value = parts.filter(Boolean).join("\n\n");
@@ -1082,8 +1181,17 @@ async function translateWithGlossary(glossary) {
       console.info("Switched models:", Array.from(switchedModels.entries()));
       notices.push("部分段落已自动切换备用模型完成翻译。");
     }
-    if (fallbackList.length) {
-      notices.push(`第 ${fallbackList.join(", ")} 段使用了备选翻译（机械翻译 + 术语替换）`);
+    if (sensitiveFallbackList.length) {
+      notices.push(`第 ${sensitiveFallbackList.join(", ")} 段已切换敏感内容兼容模型完成翻译`);
+    }
+    if (googleFallbackList.length) {
+      notices.push(`第 ${googleFallbackList.join(", ")} 段使用了备选翻译（机械翻译 + 术语替换）`);
+    }
+    const untypedFallbackList = fallbackList.filter(
+      index => !sensitiveFallbackList.includes(index) && !googleFallbackList.includes(index)
+    );
+    if (untypedFallbackList.length) {
+      notices.push(`第 ${untypedFallbackList.join(", ")} 段使用了备选翻译`);
     }
     if (notices.length) showNotice(notices.join("\n"));
 
@@ -1106,6 +1214,7 @@ async function translateWithGlossary(glossary) {
         translated_chunks: parts,
         source_chunks: chunks,
         fallback_indices: fallbackList,
+        google_fallback_indices: googleFallbackList,
         glossary: clean,
         fast,
         modelSessionId: currentModelSessionId,
@@ -1124,7 +1233,18 @@ async function translateWithGlossary(glossary) {
           : "已完成译文问题复核，请检查术语和人称是否符合原文。"
       );
     }
+
+    void trackGlossaryUsageEvent("glossary_translate_completed", {
+      ...usageStats,
+      durationMs: Date.now() - startedAt,
+      ok: true,
+    });
   } catch (err) {
+    void trackGlossaryUsageEvent("glossary_translate_failed", {
+      ...usageStats,
+      durationMs: Date.now() - startedAt,
+      ok: false,
+    });
     showError(err);
     $("progress-label").textContent = "失败";
   } finally {
@@ -1249,83 +1369,7 @@ document.querySelectorAll(".help-tab").forEach(tab => {
   tab.addEventListener("click", () => switchHelpTab(tab.dataset.helpTab));
 });
 
-// ══════════════════════════════════════════════════════════
-//  SITE LIKE
-// ══════════════════════════════════════════════════════════
-const SITE_LIKE_KEY = "postype_site_liked";
-
-async function loadSiteLikeCount() {
-  // 用 delta=0 读取或初始化固定页面的 kudos 计数，不计入新的点赞。
-  try {
-    const data = await postJSON({
-      action: "record_like",
-      payload: {
-        pageUrl: window.location.origin || "https://postype-translator.local",
-        pageTitle: "韩文同人翻译器",
-        source: "load",
-        delta: 0,
-      },
-    });
-    const count = data?.data?.likeCount;
-    if (typeof count === "number") {
-      $("like-count").textContent = count;
-    }
-  } catch (err) {
-    console.warn("site like load failed", err);
-  }
-}
-
-async function recordSiteLike() {
-  const liked = localStorage.getItem(SITE_LIKE_KEY) === "1";
-  if (liked) {
-    showNotice("已经点过赞啦，谢谢！");
-    return;
-  }
-
-  const btn = $("site-like");
-  btn.disabled = true;
-
-  try {
-    const data = await postJSON({
-      action: "record_like",
-      payload: {
-        pageUrl: window.location.origin || "https://postype-translator.local",
-        pageTitle: "韩文同人翻译器",
-        source: "site_button",
-      },
-    });
-    const count = data?.data?.likeCount;
-    if (typeof count === "number") {
-      $("like-count").textContent = count;
-    }
-    $("like-icon")?.classList?.add("liked");
-    btn.querySelector(".like-icon").textContent = "♥";
-    localStorage.setItem(SITE_LIKE_KEY, "1");
-    showNotice("谢谢喜欢！");
-  } catch (err) {
-    const apiError = getApiError(err);
-    if (apiError?.code === "DATABASE_NOT_CONFIGURED") {
-      showError("暂时没能录入……呜呜……");
-    } else {
-      showError(err);
-    }
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-$("site-like")?.addEventListener("click", recordSiteLike);
-
-// 页面加载时反映 localStorage 状态
-if (localStorage.getItem(SITE_LIKE_KEY) === "1") {
-  const btn = $("site-like");
-  if (btn) {
-    btn.querySelector(".like-icon").textContent = "♥";
-    btn.querySelector(".like-icon").classList.add("liked");
-  }
-}
 
 // ── Init ─────────────────────────────────────────────────
 updateGlossaryModeLabel();
 loadGlossaryPresets();
-loadSiteLikeCount();

@@ -12,14 +12,8 @@ import io
 import random
 import urllib.parse
 
-from api.db import (
-    DatabaseNotConfigured,
-    ValidationError,
-    save_event,
-    save_glossary_entries,
-    save_glossary_upload,
-    save_site_like,
-)
+from api.db import DatabaseNotConfigured, ValidationError
+from api.db_actions import build_db_write
 
 # ---------------------------------------------------------------------------
 # Models & config
@@ -48,44 +42,51 @@ STANDARD_MODELS = [
     "qwen3-30b-a3b",
     "qwq-plus",
     "qwen3.5-27b",
-    "qwen3.6-27b",
-    "qwen3.6-max-preview",
-    "qwen3.5-plus-2026-04-20",
-    "qwen3.5-plus",
-    "qwen3.6-plus",
-    "qwen3.6-plus-2026-04-02",
-    "qwen3.5-397b-a17b",
-    "qwen3.5-plus-2026-02-15",
-    "qwen3-vl-8b-instruct",
+    # "qwen3.5-plus",
+    # "qwen3.6-plus",
+    # "qwen3.6-plus-2026-04-02",
+    # "qwen3.5-397b-a17b",
+    # "qwen3.5-plus-2026-02-15",
     "qwen-vl-plus",
-    "qwen3-vl-30b-a3b-instruct",
     "qwen3-vl-plus",
     "qwen3-vl-plus-2025-12-19",
     "qwen3-vl-plus-2025-09-23",
-    "qwen-vl-max",
     "qwen3-vl-235b-a22b-instruct",
-    "qwen3-vl-30b-a3b-thinking",
     "qwen3-vl-8b-thinking",
     "qwen3-vl-235b-a22b-thinking",
 ]
 
 LIGHT_MODELS = [
-    "qwen-mt-flash",
-    "qwen-mt-turbo",
-    "qwen-mt-lite",
     "deepseek-v4-flash",
     "qwen-flash-2025-07-28",
     "qwen3-0.6b",
-    "qwen-turbo",
-    "qwen-flash",
     "qwen3-8b",
+    "qwen-mt-lite",
     "qwen3.6-flash-2026-04-16",
     "qwen3.6-flash",
     "qwen3.5-flash-2026-02-23",
-    "qwen3.5-flash",
+    # "qwen3.5-flash",
+]
+
+SENSITIVE_FALLBACK_MODELS = [
+    "qwen-mt-flash",
+    "qwen-mt-turbo",
+    "qwen-turbo",
+    "qwen-flash",
+    "qwen-vl-max",
+    "qwen-vl-plus",
     "qwen3-vl-flash-2025-10-15",
     "qwen3-vl-flash-2026-01-22",
     "qwen3-vl-flash",
+    "qwen3-30b-a3b-instruct-2507",
+    "qwen3-next-80b-a3b-instruct",
+    "qwen3-vl-235b-a22b-thinking",
+    "qwen3-vl-30b-a3b-instruct",
+    "qwen3-vl-30b-a3b-thinking",
+    "qwen3-vl-8b-instruct",
+    # "qwen3.5-plus-2026-04-20",
+    # "qwen3.6-27b",
+    # "qwen3.6-max-preview",
 ]
 
 # Backward-compatible defaults for callers/tests that pass a single model.
@@ -165,20 +166,22 @@ SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责将韩文正�
 - 原文故意省略主语时，中文也可以适度省略。
 """
 
-EXTRACT_TERMS_PROMPT = """你是专业韩文小说术语提取器。请阅读以下韩文小说文本，提取所有专有名词和术语。
+EXTRACT_TERMS_PROMPT = """你是专业韩文小说高频实词术语翻译器。系统已经从文章中按出现频率抽出了候选韩文实词，你只需要逐项判断、过滤并翻译这些候选词。
 
-重点关注：
-1. 带 「」『』[]〈〉《》"" '' 及其他引号或括号包裹的词（通常是技能名、称号、物品名、作品名等）
-2. 反复出现的人名（包括昵称、绰号、缩写）、地名、组织名
-3. 虚构概念、魔法/能力名称、头衔、职位
-4. 非日常用语的专有名词
+处理原则：
+1. 只处理【候选高频词】里的词，不要从上下文中自行新增词条。
+2. 保留适合作为翻译术语表的高频实词：人名、昵称、称呼、地名、组织名、头衔、物品、作品名、虚构概念，以及反复出现且需要统一译法的名词/实义词。
+3. 必须过滤掉没有术语价值的连接词、助词残片、语尾残片、代词、泛用副词、泛用动词/形容词、数字量词、普通寒暄和过于日常的词。
+4. 如果某个候选词看起来像被韩文助词或语尾粘连了，请在 ko 字段中使用更干净的原形/词干，并给出自然的简体中文译法。
+5. 不确定是否有意义时，宁可过滤掉。
+6. 必须过滤“脑袋/眼睛/手/脸/嘴”等普通身体部位、普通家具、普通动作对象等直译即可的日常名词；只有它们作为角色昵称、专有称号、虚构概念或引号内专名出现时才保留。
+7. 标注为【引号内出现】的词条，是原文用「」『』《》【】[] 等成对引号特意框住的内容，大概率是专有名词/技能/作品/物品/组织，请优先保留并翻译；只有在明显是普通台词强调或语气词时才过滤。
 
 输出要求：
 - 只输出 JSON 数组，不要任何其他文字、markdown 标记或代码块符号
 - 每项格式：{"ko": "韩文原文", "zh": "建议中文翻译", "category": "类别"}
-- category 可选值：人名、地名、技能、称号、物品、组织、其他
-- 不要包含日常词汇和通用动词/形容词
-- 如果没有找到术语，返回空数组 []
+- category 可选值：人名、地名、技能、称号、物品、组织、称呼、其他
+- 如果没有可用词条，返回空数组 []
 """
 
 FIX_SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责对已经翻译成中文的文本做最小必要修正。
@@ -317,43 +320,233 @@ def split_text(text: str, max_chars: int = MAX_CHARS):
 # Glossary helpers
 # ---------------------------------------------------------------------------
 
+KOREAN_CONTENT_TOKEN_RE = re.compile(r"[가-힣]{2,}")
+
+# 韩文小说常用的成对引号/括号。每对 (左, 右) 都会被用于抽取内部内容。
+QUOTED_TERM_DELIMITERS = (
+    ("「", "」"),
+    ("『", "』"),
+    ("《", "》"),
+    ("〈", "〉"),
+    ("【", "】"),
+    ("［", "］"),
+    ("[", "]"),
+    ("\u201c", "\u201d"),   # “”
+    ("\u2018", "\u2019"),   # ‘’
+)
+
+# 内部必须至少含一个韩文字符，才算韩文术语候选；
+# 允许内部混入数字/汉字/空格，但整体长度有上限，避免把一整句台词当术语。
+QUOTED_TERM_MAX_INNER_LEN = 20
+QUOTED_TERM_HAS_KOREAN_RE = re.compile(r"[가-힣]")
+QUOTED_TERM_SENTENCE_PUNCT = "。！？.!?…"
+
+# 构造一个总的正则：匹配任意一种成对引号内的内容（非贪婪，不跨行）
+_QUOTED_TERM_PATTERN = "|".join(
+    f"{re.escape(l)}([^{re.escape(l)}{re.escape(r)}\\n]{{1,{QUOTED_TERM_MAX_INNER_LEN}}}?){re.escape(r)}"
+    for l, r in QUOTED_TERM_DELIMITERS
+)
+QUOTED_TERM_RE = re.compile(_QUOTED_TERM_PATTERN)
+
+
+def extract_quoted_terms(text: str) -> list:
+    """从成对引号/括号中抽取候选术语。
+
+    返回 [(token, count), ...]，按出现次数和首次出现顺序排序。
+    引号内的内容至少要包含一个韩文字符；会自动去除首尾空白；
+    会跳过明显是整句台词的内容（带句末标点或过长）。
+    """
+    if not text:
+        return []
+
+    counts = {}
+    first_seen = {}
+    order = 0
+
+    for match in QUOTED_TERM_RE.finditer(text):
+        inner = next((g for g in match.groups() if g is not None), None)
+        if not inner:
+            continue
+        token = inner.strip()
+        if len(token) < 2:
+            continue
+        # 必须含韩文；纯数字、纯英文、纯标点都跳过
+        if not QUOTED_TERM_HAS_KOREAN_RE.search(token):
+            continue
+        # 整句话过滤：包含句末标点的，大概率是台词不是术语
+        if any(ch in token for ch in QUOTED_TERM_SENTENCE_PUNCT):
+            continue
+        counts[token] = counts.get(token, 0) + 1
+        if token not in first_seen:
+            first_seen[token] = order
+            order += 1
+
+    return sorted(
+        counts.items(),
+        key=lambda item: (-item[1], -len(item[0]), first_seen[item[0]]),
+    )
+
+
+KOREAN_STOPWORDS = {
+    "그리고", "그러나", "하지만", "그래서", "그러면", "그러니까", "그런데", "그러다",
+    "이렇게", "그렇게", "저렇게", "어떻게", "이제", "다시", "이미", "아직", "바로",
+    "너무", "정말", "진짜", "아주", "조금", "잠깐", "계속", "그냥", "어서", "빨리",
+    "모두", "전부", "자꾸", "가장", "항상", "절대", "역시", "물론", "혹시", "분명",
+    "그것", "이것", "저것", "여기", "거기", "저기", "누구", "무엇", "뭐야", "어디",
+    "내가", "네가", "제가", "나는", "너는", "우린", "우리는", "너희", "자신",
+    "있다", "없다", "했다", "한다", "하면", "하고", "하는", "해서", "됐다", "된다", "되어",
+    "보다", "보는", "봤다", "왔다", "가는", "갔다", "같다", "같은", "싶다", "싶은",
+    "말했다", "말한", "생각", "정도", "사람", "시간", "때문", "지금", "오늘", "어제",
+}
+
+KOREAN_PARTICLE_SUFFIXES = (
+    "에게서", "으로서", "으로써", "로부터", "까지", "부터", "처럼", "보다", "마다",
+    "조차", "마저", "라도", "이나", "나마", "에게", "한테", "께서", "에서", "으로",
+    "하고", "이랑", "랑", "과", "와", "은", "는", "이", "가", "을", "를", "에", "의",
+    "도", "만", "로", "야", "아", "여",
+)
+
+TERM_CANDIDATE_LIMIT = 24
+TERM_CONTEXT_SAMPLE_CHARS = 2000
+
+# 这些词通常可以被模型直接翻译，不需要进入术语审核；
+# 引号内出现的同形词仍会保留给模型判断，避免误删专名/称号。
+KOREAN_EASY_TRANSLATABLE_TERMS = {
+    "머리", "머릿속", "머리카락", "눈", "눈동자", "눈길", "시선", "얼굴", "표정",
+    "코", "입", "입술", "귀", "목", "목소리", "어깨", "팔", "손", "손가락",
+    "가슴", "허리", "다리", "발", "발목", "몸", "등", "피부", "침대", "문",
+    "창문", "방", "집", "책상", "의자", "소파", "옷", "신발",
+}
+
+
 def sample_text(text: str, max_chars: int = 10000) -> str:
+    """按 max_chars 自适应切首/中/尾。
+
+    首 50% / 中 25% / 尾 25%，对任何 max_chars 都成立；
+    原文不超过 max_chars 时原样返回。
+    """
     if len(text) <= max_chars:
         return text
-    first = text[:5000]
-    mid_start = len(text) // 2 - 1250
-    middle = text[mid_start : mid_start + 2500]
-    last = text[-2500:]
+    first_len = max_chars // 2
+    side_len = max_chars // 4
+    first = text[:first_len]
+    mid_start = max(0, len(text) // 2 - side_len // 2)
+    middle = text[mid_start : mid_start + side_len]
+    last = text[-side_len:]
     return first + "\n…\n" + middle + "\n…\n" + last
 
 
-def extract_terms(client, text: str, model: str = MODEL_QUALITY) -> list:
-    sampled = sample_text(text)
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=build_chat_messages(EXTRACT_TERMS_PROMPT, sampled, model),
-            temperature=0.1,
-        )
-        raw = resp.choices[0].message.content.strip()
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        terms = json.loads(raw)
-        if not isinstance(terms, list):
-            return []
-        valid = []
-        for t in terms:
-            if isinstance(t, dict) and "ko" in t and "zh" in t:
-                valid.append({
-                    "ko": str(t["ko"]),
-                    "zh": str(t["zh"]),
-                    "category": str(t.get("category", "其他")),
-                })
-        return valid
-    except Exception as exc:
-        if is_quota_error(exc):
-            raise
+def normalize_korean_content_token(token: str) -> str:
+    token = (token or "").strip()
+    if len(token) < 2 or token in KOREAN_STOPWORDS:
+        return ""
+    normalized = token
+    changed = True
+    while changed and len(normalized) > 2:
+        changed = False
+        for suffix in KOREAN_PARTICLE_SUFFIXES:
+            if normalized.endswith(suffix) and len(normalized) - len(suffix) >= 2:
+                normalized = normalized[: -len(suffix)]
+                changed = True
+                break
+    if len(normalized) < 2 or normalized in KOREAN_STOPWORDS:
+        return ""
+    return normalized
+
+
+def extract_frequent_content_words(text: str, limit: int = TERM_CANDIDATE_LIMIT) -> list:
+    # ---- 引号术语：即使只出现一次也保留 ----
+    quoted = extract_quoted_terms(text or "")
+    quoted_tokens = {token for token, _ in quoted}
+
+    # ---- 原有的频率统计 ----
+    counts = {}
+    first_seen = {}
+    order = 0
+    for match in KOREAN_CONTENT_TOKEN_RE.finditer(text or ""):
+        token = normalize_korean_content_token(match.group(0))
+        if not token or token in KOREAN_EASY_TRANSLATABLE_TERMS:
+            continue
+        counts[token] = counts.get(token, 0) + 1
+        if token not in first_seen:
+            first_seen[token] = order
+            order += 1
+
+    if not counts and not quoted:
         return []
+
+    min_count = 3 if len(text or "") >= 5000 else 2
+    candidates = [(token, count) for token, count in counts.items() if count >= min_count]
+    if len(candidates) < 12:
+        candidates = [(token, count) for token, count in counts.items() if count >= 2]
+
+    candidates.sort(key=lambda item: (-item[1], -len(item[0]), first_seen[item[0]]))
+
+    # ---- 合并：引号术语优先放在前面，避免被 limit 截掉 ----
+    merged = list(quoted)
+    seen = set(quoted_tokens)
+    for token, count in candidates:
+        if token in seen:
+            continue
+        merged.append((token, count))
+        seen.add(token)
+
+    return merged[:limit]
+
+
+def build_term_translation_prompt(text: str, candidates: list) -> str:
+    quoted_tokens = {token for token, _ in extract_quoted_terms(text or "")}
+    candidate_lines = []
+    for token, count in candidates:
+        if token in quoted_tokens:
+            suffix = "（引号内出现，大概率是专有术语）"
+        else:
+            suffix = f"（出现 {count} 次）"
+        candidate_lines.append(f"- {token}{suffix}")
+    sampled = sample_text(text, max_chars=TERM_CONTEXT_SAMPLE_CHARS)
+    return (
+        "【候选高频词】\n"
+        + "\n".join(candidate_lines)
+        + "\n\n【上下文节选，仅用于判断词义，不要从这里新增词条】\n"
+        + sampled
+    )
+
+
+def extract_terms(client, text: str, model: str = MODEL_QUALITY) -> list:
+    candidates = extract_frequent_content_words(text)
+    if not candidates:
+        return []
+    prompt = build_term_translation_prompt(text, candidates)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=build_chat_messages(EXTRACT_TERMS_PROMPT, prompt, model),
+        temperature=0.1,
+    )
+    raw = resp.choices[0].message.content.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    try:
+        terms = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(terms, list):
+        return []
+    valid = []
+    quoted_tokens = {token for token, _ in extract_quoted_terms(text or "")}
+    for t in terms:
+        if isinstance(t, dict) and "ko" in t and "zh" in t:
+            ko = str(t["ko"]).strip()
+            zh = str(t["zh"]).strip()
+            if not ko or not zh:
+                continue
+            if ko in KOREAN_EASY_TRANSLATABLE_TERMS and ko not in quoted_tokens:
+                continue
+            valid.append({
+                "ko": ko,
+                "zh": zh,
+                "category": str(t.get("category", "其他")),
+            })
+    return valid
 
 
 def filter_glossary_for_chunk(glossary: list, chunk: str) -> list:
@@ -411,6 +604,10 @@ class TranslationText(str):
         return obj
 
 
+class StreamingTranslationInterrupted(Exception):
+    """Raised when a streaming provider call fails after tokens reached client."""
+
+
 def translate_by_google(text: str) -> str:
     try:
         url = "https://translate.googleapis.com/translate_a/single"
@@ -454,6 +651,55 @@ def is_quota_error(exc: Exception) -> bool:
     return any(m in code or m in message for m in quota_markers)
 
 
+def is_sensitive_content_error(exc: Exception) -> bool:
+    """Best-effort detection for provider content moderation/safety refusals."""
+    status_code = getattr(exc, "status_code", None)
+    code = str(getattr(exc, "code", "") or "").lower()
+    message = str(exc).lower()
+    body = str(getattr(exc, "body", "") or "").lower()
+    combined = " ".join([code, message, body])
+    sensitive_markers = (
+        "sensitive",
+        "content policy",
+        "content_policy",
+        "content-policy",
+        "safety",
+        "safe guard",
+        "safeguard",
+        "moderation",
+        "moderated",
+        "audit",
+        "review failed",
+        "risk content",
+        "risky content",
+        "unsafe",
+        "refuse",
+        "refusal",
+        "rejected by policy",
+        "violat",
+        "prohibited",
+        "not allowed",
+        "inappropriate",
+        "illegal",
+        "敏感",
+        "内容安全",
+        "安全",
+        "审核",
+        "审查",
+        "风控",
+        "违规",
+        "违反",
+        "拒绝",
+        "不合规",
+        "不安全",
+        "禁止",
+        "高风险",
+    )
+    if status_code in (400, 403, 422) and any(m in combined for m in sensitive_markers):
+        return True
+    return any(m in code or m in message or m in body for m in sensitive_markers)
+
+
 def split_chunk_further(chunk: str, max_chars: int = 800) -> list:
     lines = chunk.replace("\r", "\n").split("\n")
     sub_chunks, current = [], ""
@@ -478,6 +724,8 @@ def translate_chunk(
     glossary=None,
     model=MODEL_QUALITY,
     retry_count=0,
+    allow_google_fallback=True,
+    enable_internal_retry=True,
 ):
     context = ""
     if previous_translation:
@@ -508,7 +756,11 @@ def translate_chunk(
         )
         return response.choices[0].message.content.strip()
     except Exception as exc:
-        if is_quota_error(exc):
+        if is_quota_error(exc) or is_sensitive_content_error(exc):
+            raise
+        # 被外层模型轮换调用时，禁用内部切小重试；失败立刻 raise，让外层换模型，
+        # 避免一个 400 模型消耗多次 API 请求。
+        if not enable_internal_retry:
             raise
         if retry_count == 0:
             sub_chunks = split_chunk_further(chunk)
@@ -521,10 +773,11 @@ def translate_chunk(
                                 client, sc, index, total,
                                 previous_translation, glossary,
                                 model=model, retry_count=1,
+                                allow_google_fallback=allow_google_fallback,
                             )
                         )
                     except Exception as exc:
-                        if is_quota_error(exc):
+                        if is_quota_error(exc) or is_sensitive_content_error(exc) or not allow_google_fallback:
                             raise
                         fallback = translate_by_google_with_glossary(sc, glossary or [])
                         results.append(TranslationText(fallback, used_google=True))
@@ -532,10 +785,127 @@ def translate_chunk(
                     "\n".join(results),
                     used_google=any(getattr(result, "used_google", False) for result in results),
                 )
+        if not allow_google_fallback:
+            raise
         fallback = translate_by_google_with_glossary(chunk, glossary or [])
         if fallback and fallback != chunk:
             return TranslationText(fallback, used_google=True)
         raise
+
+
+def build_translation_user_prompt(chunk, index, total, previous_translation="", glossary=None):
+    context = ""
+    if previous_translation:
+        context = (
+            "【上一段译文结尾，仅用于保持上下文一致，不要重复翻译】\n"
+            f"{previous_translation[-2000:]}\n\n"
+        )
+
+    glossary_section = build_glossary_prompt_section(glossary, chunk=chunk) if glossary else ""
+    if glossary_section:
+        glossary_section += "\n\n"
+
+    return (
+        f"{context}{glossary_section}"
+        f"下面是韩文小说正文的第 {index}/{total} 段。\n\n"
+        "请直接翻译成简体中文。注意承接上一段的人物称呼、语气、情绪和文风，"
+        "但不要重复上一段内容。\n"
+        "特别注意保持术语和专有名词的翻译一致性，"
+        "如果术语表中有对应条目，必须使用术语表中的译法。\n\n"
+        f"【当前原文】\n{chunk}\n"
+    )
+
+
+def translate_chunk_stream(
+    client, chunk, index, total,
+    previous_translation="",
+    glossary=None,
+    model=MODEL_QUALITY,
+    on_delta=None,
+):
+    """Translate a chunk through DashScope's OpenAI-compatible streaming API."""
+    user_prompt = build_translation_user_prompt(
+        chunk, index, total, previous_translation, glossary,
+    )
+    response = client.chat.completions.create(
+        model=model,
+        messages=build_chat_messages(SYSTEM_PROMPT, user_prompt, model),
+        temperature=0.2,
+        stream=True,
+    )
+
+    parts = []
+    for event in response:
+        choices = getattr(event, "choices", None) or []
+        if not choices:
+            continue
+        delta = getattr(choices[0], "delta", None)
+        content = getattr(delta, "content", None) if delta else None
+        if not content:
+            continue
+        parts.append(content)
+        if on_delta:
+            on_delta(content)
+
+    return TranslationText("".join(parts).strip())
+
+
+def translate_by_google_split_with_glossary(chunk: str, glossary: list) -> TranslationText:
+    results = [
+        translate_by_google_with_glossary(sub_chunk, glossary or [])
+        for sub_chunk in split_chunk_further(chunk)
+    ]
+    return TranslationText("\n".join(results), used_google=True)
+
+
+def randomized_sensitive_fallback_models():
+    """Return a fresh random polling order for sensitive-content fallbacks."""
+    return random.sample(SENSITIVE_FALLBACK_MODELS, k=len(SENSITIVE_FALLBACK_MODELS))
+
+
+SENSITIVE_FALLBACK_MAX_ATTEMPTS = 4
+
+
+def run_sensitive_model_rotation(callback, max_attempts=SENSITIVE_FALLBACK_MAX_ATTEMPTS):
+    """Try a few randomly-ordered sensitive-friendly models, then give up.
+
+    - Caps total attempts at ``max_attempts`` so we don't burn through the
+      entire pool (15 models × per-model request cost) on hopeless inputs.
+    - Exits early on quota errors: those won't be cured by trying more models.
+    """
+    last_exc = None
+    full_order = randomized_sensitive_fallback_models()
+    model_order = full_order[:max_attempts]
+    for model in model_order:
+        try:
+            result = callback(model)
+            return result, {
+                "sensitiveFallback": True,
+                "fallback": True,
+                "fallbackType": "sensitive_model",
+                "modelOrder": model_order,
+                "model": model,
+            }
+        except Exception as exc:
+            last_exc = exc
+            if is_quota_error(exc):
+                break
+            continue
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("敏感内容兼容模型池没有可用模型")
+
+
+def run_sensitive_fallback_models(client, chunk, index, total, previous, glossary):
+    return run_sensitive_model_rotation(
+        lambda model: translate_chunk(
+            client, chunk, index, total, previous,
+            glossary=glossary, model=model,
+            allow_google_fallback=False,
+            enable_internal_retry=False,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -642,15 +1012,25 @@ def fix_fallback_names_and_subjects_chunk(
     return response.choices[0].message.content.strip()
 
 
+def format_google_fallback_with_source(translated_text: str, source_text: str) -> str:
+    translated_text = (translated_text or "").rstrip()
+    source_text = (source_text or "").strip()
+    if not source_text or "【Google 备选翻译原文】" in translated_text:
+        return translated_text
+    return f"{translated_text}\n\n【Google 备选翻译原文】\n{source_text}"
+
+
 def fix_translated_chunks(
     client,
     source_chunks,
     translated_chunks,
     fallback_indices=None,
+    google_fallback_indices=None,
     glossary=None,
     model=MODEL_QUALITY,
 ):
     fallback_set = set(fallback_indices or [])
+    google_fallback_set = set(google_fallback_indices or [])
     fixed = list(translated_chunks)
     total = len(fixed)
 
@@ -694,6 +1074,9 @@ def fix_translated_chunks(
             except Exception:
                 fixed[idx] = translated
 
+        if chunk_no in google_fallback_set:
+            fixed[idx] = format_google_fallback_with_source(fixed[idx], source)
+
     return "\n\n".join(fixed)
 
 
@@ -723,6 +1106,24 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+
+    def _send_sse_headers(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def _send_sse_event(self, event, data):
+        payload = json.dumps(data, ensure_ascii=False)
+        self.wfile.write(f"event: {event}\n".encode("utf-8"))
+        for line in payload.splitlines() or [""]:
+            self.wfile.write(f"data: {line}\n".encode("utf-8"))
+        self.wfile.write(b"\n")
+        self.wfile.flush()
 
     def do_GET(self):
         self._send_json(200, {"ok": True, "message": "Postype translator API is running."})
@@ -872,12 +1273,131 @@ class handler(BaseHTTPRequestHandler):
             raise last_exc
         raise RuntimeError("没有可用模型")
 
+    def _stream_with_model_rotation(
+        self,
+        tier,
+        client,
+        chunk,
+        index,
+        total,
+        previous,
+        glossary,
+        model_session_id=None,
+    ):
+        models = self._ordered_models(tier, model_session_id=model_session_id)
+        first_model = models[0]
+        last_exc = None
+
+        for model in models:
+            sent_any = False
+
+            def on_delta(delta):
+                nonlocal sent_any
+                sent_any = True
+                self._send_sse_event("delta", {"delta": delta})
+
+            try:
+                translated = translate_chunk_stream(
+                    client, chunk, index, total, previous,
+                    glossary=glossary, model=model, on_delta=on_delta,
+                )
+                status = self._current_model_status(tier)
+                return translated, {
+                    "tier": tier,
+                    "model": model,
+                    "switchedModel": model != first_model,
+                    "currentModel": status["model"],
+                    "modelOrder": models,
+                    "exhaustedModels": status["exhaustedModels"],
+                }
+            except Exception as exc:
+                if sent_any:
+                    raise StreamingTranslationInterrupted(str(exc)) from exc
+                if is_quota_error(exc):
+                    last_exc = exc
+                    self._mark_model_exhausted(tier, model)
+                    continue
+                last_exc = exc
+                raise
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("没有可用模型")
+
+    def _handle_translate_stream(self, data):
+        model_session_id = self._model_session_id(data)
+        chunk = data.get("chunk", "")
+        index = int(data.get("index", 1))
+        total = int(data.get("total", 1))
+        previous = data.get("previous", "")
+        glossary = data.get("glossary", [])
+        tier = self._tier_name(data)
+
+        if not chunk:
+            status, payload = error_response("MISSING_CHUNK", 400)
+            return self._send_json(status, payload)
+
+        client = self._get_client()
+        if not client:
+            status, payload = error_response("MISSING_API_KEY", 500)
+            return self._send_json(status, payload)
+
+        self._send_sse_headers()
+        self._send_sse_event("meta", {
+            "ok": True,
+            "status": "started",
+            "index": index,
+            "total": total,
+            "modelOrder": self._ordered_models(tier, model_session_id=model_session_id),
+        })
+
+        try:
+            translated, meta = self._stream_with_model_rotation(
+                tier, client, chunk, index, total, previous, glossary,
+                model_session_id=model_session_id,
+            )
+            self._send_sse_event("done", {
+                "ok": True,
+                "translated": str(translated),
+                "fallback": False,
+                "fallbackType": "",
+                **meta,
+            })
+        except StreamingTranslationInterrupted as exc:
+            self._send_sse_event("error", {
+                "error": {
+                    "code": "STREAM_INTERRUPTED",
+                    "message": friendly_provider_error(exc),
+                    "action": ERROR_ACTION,
+                }
+            })
+        except Exception:
+            try:
+                translated, meta = run_sensitive_fallback_models(
+                    client, chunk, index, total, previous, glossary or [],
+                )
+                self._send_sse_event("delta", {"delta": str(translated)})
+                self._send_sse_event("done", {
+                    "ok": True,
+                    "translated": str(translated),
+                    "note": "此 chunk 已切换兼容模型完成翻译",
+                    **meta,
+                })
+            except Exception:
+                translated = translate_by_google_split_with_glossary(chunk, glossary or [])
+                self._send_sse_event("delta", {"delta": str(translated)})
+                self._send_sse_event("done", {
+                    "ok": True,
+                    "translated": str(translated),
+                    "fallback": True,
+                    "fallbackType": "google",
+                    "note": "此 chunk 使用了机械翻译",
+                    "modelOrder": self._ordered_models(tier, model_session_id=model_session_id),
+                })
+        return None
+
     def _pick_model(self, data):
         return self._current_model_status(self._tier_name(data))["model"]
-
-    def _db_payload(self, data):
-        payload = data.get("payload")
-        return payload if isinstance(payload, dict) else data
 
     def _send_db_result(self, callback):
         try:
@@ -946,36 +1466,35 @@ class handler(BaseHTTPRequestHandler):
                 if not client:
                     status, payload = error_response("MISSING_API_KEY", 500)
                     return self._send_json(status, payload)
-                # Term extraction is a quality-sensitive one-shot step, so use
-                # the standard model pool with quota-aware rotation.
-                terms, meta = self._run_with_model_rotation(
-                    "standard",
-                    lambda model: extract_terms(client, text, model=model),
-                    model_session_id=model_session_id,
-                )
+                # 术语提取先用轻量模型池：候选词已经在本地按频率和停用词收窄，
+                # 让模型只做快速审核/翻译，避免在正式翻译前等待过久。
+                try:
+                    terms, meta = self._run_with_model_rotation(
+                        "light",
+                        lambda model: extract_terms(client, text, model=model),
+                        model_session_id=model_session_id,
+                    )
+                except Exception:
+                    try:
+                        terms, meta = run_sensitive_model_rotation(
+                            lambda model: extract_terms(client, text, model=model)
+                        )
+                    except Exception:
+                        terms, meta = [], {
+                            "modelOrder": self._ordered_models("light", model_session_id=model_session_id),
+                        }
                 return self._send_json(200, {"ok": True, "terms": terms, **meta})
 
             # === MONGODB OPTIONAL WRITES ===
-            if action == "record_like":
-                payload = self._db_payload(data)
-                return self._send_db_result(lambda: save_site_like(payload))
-
-            if action == "save_glossary_upload":
-                payload = self._db_payload(data)
-                return self._send_db_result(lambda: save_glossary_upload(payload))
-
-            if action == "save_glossary_entries":
-                payload = self._db_payload(data)
-                entries = payload.get("entries", [])
-                context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else payload
-                return self._send_db_result(lambda: save_glossary_entries(entries, context))
-
-            if action == "track_event":
-                payload = self._db_payload(data)
-                return self._send_db_result(lambda: save_event(payload))
+            db_write = build_db_write(action, data)
+            if db_write:
+                return self._send_db_result(db_write)
 
             # === TRANSLATE ===
             if action == "translate":
+                if data.get("stream"):
+                    return self._handle_translate_stream(data)
+
                 model_session_id = self._model_session_id(data)
                 chunk = data.get("chunk", "")
                 index = int(data.get("index", 1))
@@ -998,6 +1517,8 @@ class handler(BaseHTTPRequestHandler):
                         lambda model: translate_chunk(
                             client, chunk, index, total, previous,
                             glossary=glossary, model=model,
+                            allow_google_fallback=False,
+                            enable_internal_retry=False,
                         ),
                         model_session_id=model_session_id,
                     )
@@ -1006,13 +1527,28 @@ class handler(BaseHTTPRequestHandler):
                         "ok": True,
                         "translated": str(translated),
                         "fallback": used_google,
+                        "fallbackType": "google" if used_google else "",
                         "note": "此 chunk 使用了机械翻译" if used_google else "",
                         **meta,
                     })
                 except Exception:
-                    translated = translate_by_google_with_glossary(chunk, glossary or [])
+                    try:
+                        translated, meta = run_sensitive_fallback_models(
+                            client, chunk, index, total, previous, glossary or [],
+                        )
+                        return self._send_json(200, {
+                            "ok": True,
+                            "translated": str(translated),
+                            "note": "此 chunk 已切换兼容模型完成翻译",
+                            **meta,
+                        })
+                    except Exception:
+                        pass
+
+                    translated = translate_by_google_split_with_glossary(chunk, glossary or [])
                     return self._send_json(200, {
-                        "ok": True, "translated": translated, "fallback": True,
+                        "ok": True, "translated": str(translated), "fallback": True,
+                        "fallbackType": "google",
                         "note": "此 chunk 使用了机械翻译",
                         "modelOrder": self._ordered_models(tier, model_session_id=model_session_id),
                     })
@@ -1032,9 +1568,12 @@ class handler(BaseHTTPRequestHandler):
                 source_chunks = data.get("source_chunks", [])
                 translated_chunks = data.get("translated_chunks", [])
                 fallback_indices = data.get("fallback_indices", [])
+                google_fallback_indices = data.get("google_fallback_indices", [])
                 glossary = data.get("glossary", [])
                 if not isinstance(fallback_indices, list):
                     fallback_indices = []
+                if not isinstance(google_fallback_indices, list):
+                    google_fallback_indices = []
 
                 if isinstance(source_chunks, list) and isinstance(translated_chunks, list) and translated_chunks:
                     fixed, meta = self._run_with_model_rotation(
@@ -1044,6 +1583,7 @@ class handler(BaseHTTPRequestHandler):
                             [str(chunk) for chunk in source_chunks],
                             [str(chunk) for chunk in translated_chunks],
                             fallback_indices=[int(i) for i in fallback_indices if str(i).isdigit()],
+                            google_fallback_indices=[int(i) for i in google_fallback_indices if str(i).isdigit()],
                             glossary=glossary,
                             model=model,
                         ),

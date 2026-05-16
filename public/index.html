@@ -99,7 +99,7 @@
         <span>篇章术语确认</span>
         <span class="count" id="terms-count">0 条</span>
       </div>
-      <p class="terms-hint">以下为新发现的补充术语，请检查后开始翻译。</p>
+      <p class="terms-hint">以下为新发现的补充术语，请检查后开始翻译。删除无效术语可以提升翻译速度哦。</p>
       <div class="g-table-wrap" style="max-height:320px">
         <table class="g-table">
           <thead><tr>
@@ -197,7 +197,7 @@
         <ol class="help-list">
           <li>输入 Postype 页面 URL</li>
           <li>手动复制粘贴韩文正文</li>
-          <li>上传 .html 或 .webarchive 文件</li>
+          <li>上传 .html 文件</li>
         </ol>
       </div>
 
@@ -209,8 +209,8 @@
         <div class="help-section-title">注意事项</div>
         <ul class="help-list">
           <li>URL和上传的部分只适配Postype。</li>
-          <li>.webarchive 文件会解析主资源中的 HTML 内容。但因为文件一般太大，所以基本是摆设状态。</li>
           <li>翻译质量和速度会受到不同因素的影响。如果翻译不理想，建议朴素地重试一次。</li>
+          <li>为了更好地改进功能，部分使用行为将在完全匿名化后以数值形式记录。</li>
         </ul>
       </div>
     </div>
@@ -218,7 +218,11 @@
     <div id="help-changelog-panel" class="help-tab-panel" role="tabpanel">
       <div class="help-section">
         <div class="help-section-title">2026-05-15</div>
-        <p>更新了提交术语库的功能。现在开始可以贡献自己创建的用户术语库了。</p>
+        <ol class="help-list">
+          <li>更新了提交术语库的功能。现在可以贡献自己创建的用户术语库了。</li>
+          <li>导入了所有有额度的 qwen 模型，每次翻译会从模型池中随机抽取。响应较慢的模型被抽中的概率降低了。</li>
+          <li>努力修复了一部分现有错误。</li>
+        </ol>
       </div>
     </div>
 
@@ -245,6 +249,7 @@
   <span class="like-count" id="like-count">0</span>
 </button> -->
   
+<script src="glossary-usage.js" defer></script>
 <script src="app.js" defer></script>
 </body>
 </html>

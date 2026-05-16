@@ -228,6 +228,45 @@ def save_glossary_entries(entries, context=None):
     return [_serialize_document(doc) for doc in docs]
 
 
+ALLOWED_GLOSSARY_CATEGORIES = {
+    "人名",
+    "地名",
+    "技能",
+    "称号",
+    "物品",
+    "组织",
+    "称呼",
+    "艺名",
+    "本名",
+    "其他",
+}
+
+
+def _optional_bool(payload, key):
+    if key not in payload:
+        return None
+    return bool(payload[key])
+
+
+def _sanitize_category_counts(payload, key, *, maximum=100_000):
+    counts = payload.get(key)
+    if counts is None:
+        return None
+    if not isinstance(counts, dict):
+        raise ValidationError(f"{key} 必须是对象")
+
+    sanitized = {}
+    for category, value in counts.items():
+        category = str(category).strip()
+        if category not in ALLOWED_GLOSSARY_CATEGORIES:
+            continue
+        try:
+            sanitized[category] = min(max(0, int(value)), maximum)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(f"{key}.{category} 必须是整数") from exc
+    return sanitized or None
+
+
 def sanitize_event(payload):
     """Whitelist and normalize a lightweight operational event."""
     event_type = _require_string(payload, "eventType", 80)
@@ -237,9 +276,19 @@ def sanitize_event(payload):
         "source": _require_string(payload, "source", 80, required=False),
         "tier": _require_string(payload, "tier", 40, required=False),
         "model": _require_string(payload, "model", 120, required=False),
+        "userId": _require_string(payload, "userId", 120, required=False),
+        "glossaryMode": _require_string(payload, "glossaryMode", 40, required=False),
+        "presetId": _require_string(payload, "presetId", 120, required=False),
+        "usedPresetGlossary": _optional_bool(payload, "usedPresetGlossary"),
+        "presetModified": _optional_bool(payload, "presetModified"),
         "durationMs": _optional_int(payload, "durationMs", minimum=0, maximum=86_400_000),
         "chunkCount": _optional_int(payload, "chunkCount", minimum=0, maximum=100_000),
         "termCount": _optional_int(payload, "termCount", minimum=0, maximum=100_000),
+        "modifiedTermCount": _optional_int(payload, "modifiedTermCount", minimum=0, maximum=100_000),
+        "addedTermCount": _optional_int(payload, "addedTermCount", minimum=0, maximum=100_000),
+        "deletedTermCount": _optional_int(payload, "deletedTermCount", minimum=0, maximum=100_000),
+        "editedTermCount": _optional_int(payload, "editedTermCount", minimum=0, maximum=100_000),
+        "categoryCounts": _sanitize_category_counts(payload, "categoryCounts"),
         "ok": bool(payload["ok"]) if "ok" in payload else None,
     }
     if sanitized.get("pageUrl"):
