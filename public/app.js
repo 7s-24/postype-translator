@@ -1,5 +1,4 @@
 const $ = id => document.getElementById(id);
-const CATEGORIES = ["人名","地名","技能","称号","物品","组织","称呼","艺名","本名","其他"];
 const STORAGE_KEY = "postype_global_glossary";
 const PRESET_STORAGE_KEY = "postype_glossary_preset";
 const GLOSSARY_MODE_KEY = "postype_glossary_mode";
@@ -32,6 +31,26 @@ function setProgress(label, done, total) {
   $("progress-done").textContent = done;
   $("progress-total").textContent = total;
   $("progress-fill").style.width = (total > 0 ? Math.min(100, Math.round(done/total*100)) : 0) + "%";
+}
+
+let progressTraceStartedAt = 0;
+let progressTraceLines = [];
+const PROGRESS_TRACE_LIMIT = 12;
+
+function resetProgressTrace() {
+  progressTraceStartedAt = performance.now();
+  progressTraceLines = [];
+}
+
+function appendProgressTrace(message) {
+  if (!progressTraceStartedAt) progressTraceStartedAt = performance.now();
+  const elapsed = ((performance.now() - progressTraceStartedAt) / 1000).toFixed(1).padStart(5, " ");
+  const line = `[+${elapsed}s] ${message}`;
+  progressTraceLines.push(line);
+  if (progressTraceLines.length > PROGRESS_TRACE_LIMIT) {
+    progressTraceLines = progressTraceLines.slice(-PROGRESS_TRACE_LIMIT);
+  }
+  console.info("[progress trace]", line);
 }
 function scheduleToastAutoHide() {
   clearTimeout(toastTimer);
@@ -98,17 +117,6 @@ function downloadJSON(data, filename) {
   URL.revokeObjectURL(a.href);
 }
 
-function cleanGlossaryForExport(arr) {
-  return arr
-    .filter(t => t && typeof t.ko === "string" && typeof t.zh === "string")
-    .map(t => ({
-      ko: t.ko.trim(),
-      zh: t.zh.trim(),
-      category: t.category || "其他",
-    }))
-    .filter(t => t.ko && t.zh);
-}
-
 function getGlossaryMode() {
   const mode = localStorage.getItem(GLOSSARY_MODE_KEY);
   return mode === "user" || mode === "preset" ? mode : "preset";
@@ -120,63 +128,17 @@ function setGlossaryMode(mode) {
 }
 
 function updateGlossaryModeLabel() {
+  const isUserGlossary = getGlossaryMode() === "user";
   const title = $("glossary-title");
-  if (!title) return;
-  title.textContent = getGlossaryMode() === "user" ? "我的术语库" : "预设术语库";
-}
+  const submitButton = $("btn-submit-glossary");
 
-function dedupeGlossaryPreferLast(arr) {
-  const map = new Map();
-
-  for (const t of arr) {
-    if (!t || typeof t.ko !== "string" || typeof t.zh !== "string") continue;
-
-    const ko = t.ko.trim();
-    const zh = t.zh.trim();
-    if (!ko || !zh) continue;
-
-    map.set(ko, {
-      ko,
-      zh,
-      category: t.category || "其他",
-    });
+  if (title) {
+    title.textContent = isUserGlossary ? "我的术语库" : "预设术语库";
   }
 
-  return Array.from(map.values());
-}
-
-function mergeGlossaryPreferImported(current, imported) {
-  const map = new Map();
-
-  for (const t of current) {
-    if (!t || typeof t.ko !== "string" || typeof t.zh !== "string") continue;
-
-    const ko = t.ko.trim();
-    const zh = t.zh.trim();
-    if (!ko || !zh) continue;
-
-    map.set(ko, {
-      ko,
-      zh,
-      category: t.category || "其他",
-    });
+  if (submitButton) {
+    submitButton.hidden = !isUserGlossary;
   }
-
-  for (const t of imported) {
-    if (!t || typeof t.ko !== "string" || typeof t.zh !== "string") continue;
-
-    const ko = t.ko.trim();
-    const zh = t.zh.trim();
-    if (!ko || !zh) continue;
-
-    map.set(ko, {
-      ko,
-      zh,
-      category: t.category || "其他",
-    });
-  }
-
-  return Array.from(map.values());
 }
 
 function isTermsReviewOpen() {
@@ -278,13 +240,31 @@ async function postJSON(body, options = {}) {
 }
 
 async function postJSONStream(body, onDelta, callbacks = {}) {
-  const { onRestart, onMeta, signal } = callbacks;
-  const res = await fetch("/api/translate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...body, stream: true }),
-    signal,
-  });
+  const { onRestart, onMeta, onDebug, signal } = callbacks;
+  const debug = (message, extra = {}) => {
+    if (typeof onDebug === "function") onDebug({ message, ...extra });
+  };
+
+  debug("请求已发出，等待服务器响应头", { phase: "request_start" });
+  const requestStartedAt = performance.now();
+  const headerTimer = setInterval(() => {
+    const idleSeconds = Math.round((performance.now() - requestStartedAt) / 1000);
+    debug(`仍在等待服务器响应头（${idleSeconds}s）`, { phase: "waiting_headers", idleSeconds });
+  }, 5000);
+
+  let res;
+  try {
+    res = await fetch("/api/translate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, stream: true }),
+      signal,
+    });
+  } finally {
+    clearInterval(headerTimer);
+  }
+
+  debug(`收到响应头 HTTP ${res.status}`, { phase: "response_headers", status: res.status });
 
   if (!res.ok || !res.body) {
     const data = await res.json().catch(() => ({}));
@@ -297,6 +277,25 @@ async function postJSONStream(body, onDelta, callbacks = {}) {
   let currentEvent = "message";
   let currentData = [];
   let donePayload = null;
+  let receivedChars = 0;
+  let sawFirstDelta = false;
+  let lastDeltaDebugAt = 0;
+  let lastActivityAt = performance.now();
+  let readPhase = "等待首个流式事件";
+  let streamClosed = false;
+  let stoppedAfterDone = false;
+
+  const markActivity = (phase) => {
+    lastActivityAt = performance.now();
+    readPhase = phase;
+  };
+
+  const stallTimer = setInterval(() => {
+    const idleSeconds = Math.round((performance.now() - lastActivityAt) / 1000);
+    if (idleSeconds >= 5) {
+      debug(`${readPhase}，已 ${idleSeconds}s 未收到新数据`, { phase: "stall", idleSeconds });
+    }
+  }, 5000);
 
   const dispatchEvent = () => {
     if (!currentData.length) {
@@ -308,15 +307,40 @@ async function postJSONStream(body, onDelta, callbacks = {}) {
     const payload = raw ? JSON.parse(raw) : {};
 
     if (currentEvent === "delta") {
-      onDelta(payload.delta || "");
+      const delta = payload.delta || "";
+      receivedChars += delta.length;
+      onDelta(delta);
+      const now = performance.now();
+      readPhase = "等待后续译文或 done";
+      if (!sawFirstDelta || now - lastDeltaDebugAt >= 2000) {
+        debug(`${sawFirstDelta ? "继续接收译文" : "收到首段译文"}（累计 ${receivedChars} 字）`, {
+          phase: "delta",
+          receivedChars,
+        });
+        sawFirstDelta = true;
+        lastDeltaDebugAt = now;
+      }
     } else if (currentEvent === "done") {
       donePayload = payload;
+      readPhase = "已收到 done，准备结束本段请求";
+      debug(`收到 done 事件，后端已完成本段（fallback=${payload.fallback ? "yes" : "no"}）`, {
+        phase: "done",
+        fallback: Boolean(payload.fallback),
+        fallbackType: payload.fallbackType || "",
+      });
     } else if (currentEvent === "error") {
       throw makeApiError(payload.error, "STREAM_ERROR", "Streaming request failed");
     } else if (currentEvent === "restart") {
+      readPhase = "等待重试后的译文";
+      debug(`后端要求重试/切换模型：${payload.reason || "restart"}`, {
+        phase: "restart",
+        payload,
+      });
       // 后端在流式翻译中断、切换模型重试前发送，要求前端丢弃当前 chunk 的累积。
       if (typeof onRestart === "function") onRestart(payload);
     } else if (currentEvent === "meta") {
+      readPhase = "等待首段译文";
+      debug("收到流式 meta，开始等待译文", { phase: "meta", payload });
       if (typeof onMeta === "function") onMeta(payload);
     }
 
@@ -324,35 +348,56 @@ async function postJSONStream(body, onDelta, callbacks = {}) {
     currentData = [];
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() || "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      streamClosed = done;
+      markActivity(done ? "响应流关闭" : "正在解析服务端事件");
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
 
-    for (const line of lines) {
-      if (!line) {
-        dispatchEvent();
-      } else if (line.startsWith("event:")) {
-        currentEvent = line.slice(6).trim() || "message";
-      } else if (line.startsWith("data:")) {
-        currentData.push(line.slice(5).replace(/^ /, ""));
+      for (const line of lines) {
+        if (!line) {
+          dispatchEvent();
+        } else if (line.startsWith("event:")) {
+          currentEvent = line.slice(6).trim() || "message";
+        } else if (line.startsWith("data:")) {
+          currentData.push(line.slice(5).replace(/^ /, ""));
+        }
       }
+
+      if (donePayload && !done) {
+        stoppedAfterDone = true;
+        break;
+      }
+      if (done) break;
     }
-
-    if (done) break;
+  } finally {
+    clearInterval(stallTimer);
+    if (stoppedAfterDone && !streamClosed) {
+      void reader.cancel().catch(() => {});
+    }
   }
 
-  if (buffer) {
-    if (buffer.startsWith("data:")) currentData.push(buffer.slice(5).replace(/^ /, ""));
-    else if (buffer.startsWith("event:")) currentEvent = buffer.slice(6).trim() || "message";
+  if (stoppedAfterDone) {
+    debug("收到 done 后已主动结束本段请求，不再等待响应流关闭", { phase: "stopped_after_done" });
+  } else {
+    debug("响应流已关闭，准备检查 done 结果", { phase: "stream_closed" });
+
+    if (buffer) {
+      if (buffer.startsWith("data:")) currentData.push(buffer.slice(5).replace(/^ /, ""));
+      else if (buffer.startsWith("event:")) currentEvent = buffer.slice(6).trim() || "message";
+    }
+    dispatchEvent();
   }
-  dispatchEvent();
 
   if (!donePayload || donePayload.ok === false || donePayload.error) {
+    debug("未拿到有效 done，准备抛出 STREAM_ERROR", { phase: "missing_done" });
     throw makeApiError(donePayload?.error, "STREAM_ERROR", "Streaming request failed");
   }
 
+  debug("本段流式请求结束，返回翻译结果", { phase: "return_done" });
   return donePayload;
 }
 
@@ -456,22 +501,6 @@ function saveGlossary(arr, options = {}) {
 
 function getGlossary() {
   return loadGlossary() || [...defaultGlossary];
-}
-
-function normalizeGlossary(arr) {
-  if (!Array.isArray(arr)) return [];
-
-  return arr
-    .filter(t =>
-      t &&
-      typeof t.ko === "string" &&
-      typeof t.zh === "string"
-    )
-    .map(t => ({
-      ko: t.ko,
-      zh: t.zh,
-      category: t.category || "其他",
-    }));
 }
 
 async function fetchGlossaryFile(path) {
@@ -919,6 +948,12 @@ function getGlossarySubmitEntries(scope) {
 }
 
 async function submitGlossaryUpload(scope = "global") {
+  if (scope === "global" && getGlossaryMode() !== "user") {
+    showError("只有我的术语库可以分享。请先添加、编辑或导入术语哦！");
+    updateGlossaryModeLabel();
+    return;
+  }
+
   const entries = getGlossarySubmitEntries(scope);
   const label = scope === "article" ? "篇章术语" : "个人术语";
   const btn = scope === "article" ? $("btn-submit-terms") : $("btn-submit-glossary");
@@ -1036,11 +1071,14 @@ async function prepareAndExtract(options = {}) {
   hideTermsReview();
   $("output").value = "";
   $("progress").classList.add("active");
+  resetProgressTrace();
+  appendProgressTrace("开始准备正文");
   setBusy(true);
   await beginProcessingWakeLock();
   if (!isCurrentRun(runId)) return;
 
   try {
+    appendProgressTrace("加载本次模型顺序");
     await loadModelOrderForCurrentSession(isFast(), { runId, signal });
     if (!isCurrentRun(runId)) return;
 
@@ -1048,14 +1086,18 @@ async function prepareAndExtract(options = {}) {
 
     if (file) {
       setProgress("解析文件", 0, 1);
+      appendProgressTrace("读取上传文件");
       const fileData = await readFile(file);
       if (!isCurrentRun(runId)) return;
+      appendProgressTrace("提交后端解析文件");
       prep = await postJSON({ action: "prepare", fileData }, { signal });
     } else if (manual) {
       setProgress("处理文本", 0, 1);
+      appendProgressTrace("提交后端处理手动文本");
       prep = await postJSON({ action: "prepare", text: manual }, { signal });
     } else {
       setProgress("获取网页", 0, 1);
+      appendProgressTrace("提交后端抓取网页");
       prep = await postJSON({ action: "prepare", url }, { signal });
     }
     if (!isCurrentRun(runId)) return;
@@ -1063,6 +1105,7 @@ async function prepareAndExtract(options = {}) {
     const chunks = prep.chunks || [];
     if (!chunks.length) throw new Error("正文为空");
     pendingChunks = chunks;
+    appendProgressTrace(`正文准备完成：共 ${chunks.length} 段`);
 
     if (skipTermExtraction) {
       await translateWithGlossary(getGlossary().map(g => ({ ...g, _src:"global" })), { runId, signal });
@@ -1070,6 +1113,7 @@ async function prepareAndExtract(options = {}) {
     }
 
     setProgress("提取术语", 0, 1);
+    appendProgressTrace("开始提取篇章术语");
     const ext = await postJSON({
       action: "extract_terms",
       text: chunks.join("\n\n"),
@@ -1079,6 +1123,7 @@ async function prepareAndExtract(options = {}) {
 
     setModelOrderDisplay(ext);
     const articleTerms = ext.terms || [];
+    appendProgressTrace(`术语提取完成：${articleTerms.length} 条`);
 
     $("progress").classList.remove("active");
     setBusy(false);
@@ -1110,6 +1155,8 @@ async function translateWithGlossary(glossary, options = {}) {
   clearNotice();
   $("output").value = "";
   $("progress").classList.add("active");
+  resetProgressTrace();
+  appendProgressTrace("开始翻译流程");
   setBusy(true);
   await beginProcessingWakeLock();
   if (!isCurrentRun(runId)) return;
@@ -1126,13 +1173,24 @@ async function translateWithGlossary(glossary, options = {}) {
     chunkCount: total,
   });
 
+  const logTranslationStep = (message) => {
+    appendProgressTrace(message);
+  };
+  const makeStreamDebug = (chunkNumber) => (event) => {
+    const message = `第 ${chunkNumber}/${total} 段：${event.message}`;
+    appendProgressTrace(message);
+    console.debug("[translation stream]", { chunk: chunkNumber, total, ...event });
+  };
+
   void trackGlossaryUsageEvent("glossary_translate_started", usageStats);
 
   try {
     setProgress("准备翻译", 0, total);
+    logTranslationStep(`准备翻译：共 ${total} 段，${fast ? "快速模式" : "标准模式"}`);
     await loadModelOrderForCurrentSession(fast, { runId, signal });
     if (!isCurrentRun(runId)) return;
 
+    logTranslationStep("模型顺序加载完成");
     setProgress("翻译中", 0, total);
     const parts = new Array(total).fill("");
     const fallbackList = [];
@@ -1149,6 +1207,7 @@ async function translateWithGlossary(glossary, options = {}) {
         if (!isCurrentRun(runId)) return;
         const end = Math.min(start + BATCH_SIZE, total);
         setProgress(`翻译第 ${start + 1}–${end}/${total} 段`, start, total);
+        logTranslationStep(`快速模式批次开始：第 ${start + 1}–${end}/${total} 段`);
 
         const promises = [];
 
@@ -1170,6 +1229,7 @@ async function translateWithGlossary(glossary, options = {}) {
         const results = await Promise.all(promises);
         if (!isCurrentRun(runId)) return;
 
+        logTranslationStep(`快速模式批次完成：第 ${start + 1}–${end}/${total} 段`);
         for (let j = 0; j < results.length; j++) {
           const idx = start + j;
           parts[idx] = results[j].translated || "";
@@ -1195,6 +1255,7 @@ async function translateWithGlossary(glossary, options = {}) {
         if (!isCurrentRun(runId)) return;
         const prev = i > 0 ? parts[i - 1] : "";
         setProgress(`翻译第 ${i + 1}/${total} 段`, i, total);
+        logTranslationStep(`开始第 ${i + 1}/${total} 段（原文 ${chunks[i].length} 字，previous ${prev.length} 字）`);
 
         parts[i] = "";
         const data = await postJSONStream(
@@ -1242,10 +1303,12 @@ async function translateWithGlossary(glossary, options = {}) {
               if (!isCurrentRun(runId)) return;
               if (payload?.modelOrder) setModelOrderDisplay(payload);
             },
+            onDebug: makeStreamDebug(i + 1),
           }
         );
         if (!isCurrentRun(runId)) return;
 
+        logTranslationStep(`第 ${i + 1}/${total} 段请求返回，开始写入结果`);
         parts[i] = data.translated || parts[i];
         if (data.fallback) {
           fallbackList.push(i + 1);
@@ -1259,11 +1322,13 @@ async function translateWithGlossary(glossary, options = {}) {
         if (data.switchedModel && data.model) switchedModels.set(i + 1, data.model);
         $("output").value = parts.filter(Boolean).join("\n\n");
         setProgress("翻译中", i + 1, total);
+        logTranslationStep(`第 ${i + 1}/${total} 段完成，准备进入下一步`);
       }
     }
 
     if (!isCurrentRun(runId)) return;
     setProgress("完成", total, total);
+    logTranslationStep("全部段落翻译请求完成");
 
     const notices = [];
     if (switchedModels.size) {
@@ -1294,6 +1359,7 @@ async function translateWithGlossary(glossary, options = {}) {
 
     if (needsReview) {
       setProgress("修正译文问题", total, total);
+      logTranslationStep("进入译文修正/复核阶段");
       showNotice(
         containsKorean(text)
           ? "检测到韩文残留，正在自动修正并复核术语/人称…"
@@ -1301,6 +1367,7 @@ async function translateWithGlossary(glossary, options = {}) {
       );
 
       const skipFixIndices = googleFallbackList.slice();
+      logTranslationStep("提交后端修正/复核请求");
       const fix = await postJSON({
         action: "fix",
         translated_text: text,
@@ -1315,6 +1382,7 @@ async function translateWithGlossary(glossary, options = {}) {
       }, { signal });
       if (!isCurrentRun(runId)) return;
 
+      logTranslationStep("修正/复核请求返回");
       if (fix.modelOrder) setModelOrderDisplay(fix);
 
       if (fix.fixed_text) {

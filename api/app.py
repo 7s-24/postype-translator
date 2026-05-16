@@ -15,145 +15,30 @@ import urllib.parse
 
 from api.db import DatabaseNotConfigured, ValidationError
 from api.db_actions import build_db_write
-
-# ---------------------------------------------------------------------------
-# Models & config
-# ---------------------------------------------------------------------------
-STANDARD_MODELS = [
-    "qwen3-next-80b-a3b-instruct",
-    "qwen-plus-2025-09-11",
-    "qwen3-30b-a3b-instruct-2507",
-    "qwen-plus-2025-07-14",
-    "qwen3-235b-a22b-instruct-2507",
-    "deepseek-v3.2",
-    "qwen-plus-2025-04-28",
-    "qwen-plus-latest",
-    "qwen3-max-2026-01-23",
-    "qwen3-max",
-    "qwen3-max-2025-09-23",
-    "qwen3-32b",
-    "qwen3-235b-a22b",
-    # "qwen3-14b",
-    # "qwen3.6-35b-a3b",
-    # "qwen3.5-122b-a10b",
-    # "deepseek-v4-pro",
-    "qwen3-30b-a3b-thinking-2507",
-    "qwen3-235b-a22b-thinking-2507",
-    # "qwen3.5-35b-a3b",
-    # "qwen3-30b-a3b",
-    # "qwq-plus",
-    # "qwen3.5-27b",
-    # "qwen3.5-plus",
-    # "qwen3.6-plus",
-    # "qwen3.6-plus-2026-04-02",
-    # "qwen3.5-397b-a17b",
-    # "qwen3.5-plus-2026-02-15",
-    "qwen-vl-plus",
-    "qwen3-vl-plus",
-    "qwen3-vl-plus-2025-12-19",
-    "qwen3-vl-plus-2025-09-23",
-    "qwen3-vl-235b-a22b-instruct",
-    # "qwen3-vl-8b-thinking",
-    # "qwen3-vl-235b-a22b-thinking",
-]
-
-LIGHT_MODELS = [
-    "deepseek-v4-flash",
-    "qwen-flash-2025-07-28",
-    "qwen3-0.6b",
-    "qwen3-8b",
-    "qwen-mt-lite",
-    # "qwen3.6-flash-2026-04-16",
-    # "qwen3.6-flash",
-    # "qwen3.5-flash-2026-02-23",
-    # "qwen3.5-flash",
-]
-
-SENSITIVE_FALLBACK_MODELS = [
-    "qwen-mt-flash",
-    "qwen-mt-turbo",
-    "qwen-turbo",
-    "qwen-flash",
-    "qwen-vl-max",
-    "qwen-vl-plus",
-    "qwen3-vl-flash-2025-10-15",
-    "qwen3-vl-flash-2026-01-22",
-    "qwen3-vl-flash",
-    "qwen3-30b-a3b-instruct-2507",
-    "qwen3-next-80b-a3b-instruct",
-    # "qwen3-vl-235b-a22b-thinking",
-    "qwen3-vl-30b-a3b-instruct",
-    # "qwen3-vl-30b-a3b-thinking",
-    "qwen3-vl-8b-instruct",
-    # "qwen3.5-plus-2026-04-20",
-    # "qwen3.6-27b",
-    # "qwen3.6-max-preview",
-]
-
-# Backward-compatible defaults for callers/tests that pass a single model.
-MODEL_QUALITY = STANDARD_MODELS[0]
-MODEL_FAST    = LIGHT_MODELS[0]
-MAX_CHARS     = 3000          # bigger chunks → fewer API calls
-MODEL_STATE_FILE = os.getenv("MODEL_STATE_FILE", "/tmp/postype_translator_model_state.json")
-
-def env_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
-def env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed >= 0 else default
-
-
-# DashScope/OpenAI-compatible HTTP timeouts.  The defaults intentionally stay
-# well below Vercel's 300s runtime limit so a half-open provider connection can
-# fail into the existing model-rotation/fallback paths instead of exhausting the
-# whole serverless invocation.
-DASHSCOPE_CONNECT_TIMEOUT_SEC = env_float("DASHSCOPE_CONNECT_TIMEOUT_SEC", 10.0)
-DASHSCOPE_READ_TIMEOUT_SEC = env_float("DASHSCOPE_READ_TIMEOUT_SEC", 45.0)
-DASHSCOPE_WRITE_TIMEOUT_SEC = env_float("DASHSCOPE_WRITE_TIMEOUT_SEC", 10.0)
-DASHSCOPE_POOL_TIMEOUT_SEC = env_float("DASHSCOPE_POOL_TIMEOUT_SEC", 10.0)
-DASHSCOPE_MAX_RETRIES = env_int("DASHSCOPE_MAX_RETRIES", 0)
-
-ERROR_ACTION = "如果方便的话，可以复制以下的错误码，并描述错误产生的情况，提交给 fedrick1plela755@gmail.com 来帮助改进："
-
-ERRORS = {
-    "MISSING_BODY": "Missing body",
-    "MISSING_INPUT": "Missing URL or content",
-    "MISSING_CHUNK": "Missing chunk",
-    "MISSING_TRANSLATED_TEXT": "Missing translated_text",
-    "MISSING_API_KEY": "Server is missing DASHSCOPE_API_KEY",
-    "UNKNOWN_ACTION": "Unknown action",
-    "DATABASE_NOT_CONFIGURED": "Database is not configured",
-    "VALIDATION_ERROR": "Invalid database payload",
-    "RESTRICTED_POST_CONTENT": "这是付费/受限内容，请利用浏览器的阅读模式复制后手动输入，或通过浏览器保存 HTML（WebArchive 功能上线中）再重试翻译。",
-    "PROVIDER_BAD_REQUEST": "The selected model could not process this request",
-    "PROVIDER_UNAVAILABLE": "Translation service is temporarily unavailable",
-    "INTERNAL_ERROR": "Internal server error",
-}
-
-def error_response(code, status=400, message=None):
-    return status, {
-        "ok": False,
-        "error": {
-            "code": code,
-            "message": message or ERRORS.get(code, ERRORS["INTERNAL_ERROR"]),
-            "action": ERROR_ACTION,
-        },
-    }
+from api.errors import ERRORS, error_response
+from api.model_pools import (
+    LIGHT_MODELS,
+    MODEL_FAST,
+    MODEL_QUALITY,
+    SENSITIVE_FALLBACK_MODELS,
+    STANDARD_MODELS,
+)
+from api.runtime import (
+    DASHSCOPE_CONNECT_TIMEOUT_SEC,
+    DASHSCOPE_MAX_RETRIES,
+    DASHSCOPE_POOL_TIMEOUT_SEC,
+    DASHSCOPE_READ_TIMEOUT_SEC,
+    DASHSCOPE_WRITE_TIMEOUT_SEC,
+    FIX_HANDLER_BUDGET_SEC,
+    GOOGLE_RESERVE_SEC,
+    HANDLER_TOTAL_BUDGET_SEC,
+    MAX_CHARS,
+    MODEL_STATE_FILE,
+    SENSITIVE_FALLBACK_BUDGET_SEC,
+    STREAM_HANDLER_BUDGET_SEC,
+    deadline_exceeded,
+    deadline_remaining,
+)
 
 # ---------------------------------------------------------------------------
 # Model family detection
@@ -697,6 +582,15 @@ class StreamingTimeoutError(Exception):
     """Raised when streaming has no token for too long; treat as soft failure."""
 
 
+class StreamingDeadlineExceeded(Exception):
+    """Raised when the global handler deadline is hit before any tokens were sent.
+
+    A separate type from StreamingTimeoutError so the SSE handler can decide
+    quickly whether to drop into the sensitive/google fallback chain without
+    sending a 'restart' event (we never streamed anything to clear).
+    """
+
+
 def translate_by_google(text: str) -> str:
     try:
         url = "https://translate.googleapis.com/translate_a/single"
@@ -900,6 +794,7 @@ def translate_chunk_stream(
     glossary=None,
     model=MODEL_QUALITY,
     on_delta=None,
+    deadline=None,
 ):
     """Translate a chunk through DashScope's OpenAI-compatible streaming API.
 
@@ -907,6 +802,10 @@ def translate_chunk_stream(
     - 首 token 超时：模型 thinking 太久或直接卡住时尽早放弃
     - token 间隔超时：模型中途断流时尽早放弃
     - 整体超时：再慢的模型也不能拖累整个 chunk
+
+    当外层传入 ``deadline``（time.monotonic 时间戳）时，会用它再夹紧一遍整体
+    超时——即 effective_total = min(start + STREAM_TOTAL_TIMEOUT_SEC, deadline)，
+    防止"6 次重试 × 90s = 540s"超过 Vercel 的 300s 上限。
     """
     if is_qwen_mt_model(model):
         mt_kwargs = build_qwen_mt_request(chunk, glossary=glossary)
@@ -931,14 +830,21 @@ def translate_chunk_stream(
     last_token_at = started_at
     got_first_token = False
 
+    # Effective total deadline = min(local cap, external handler deadline).
+    effective_total_deadline = started_at + STREAM_TOTAL_TIMEOUT_SEC
+    if deadline is not None:
+        effective_total_deadline = min(effective_total_deadline, deadline)
+
     try:
         for event in response:
             now = time.monotonic()
 
-            # 整体超时
-            if now - started_at > STREAM_TOTAL_TIMEOUT_SEC:
+            # 整体超时（含外层 deadline）
+            if now > effective_total_deadline:
                 raise StreamingTimeoutError(
-                    f"stream total timeout >{STREAM_TOTAL_TIMEOUT_SEC}s on {model}"
+                    f"stream total timeout on {model} "
+                    f"(local_cap={STREAM_TOTAL_TIMEOUT_SEC}s, "
+                    f"global_deadline_in={None if deadline is None else round(deadline - started_at, 1)}s)"
                 )
             # 首 token 超时
             if not got_first_token and now - started_at > STREAM_FIRST_TOKEN_TIMEOUT_SEC:
@@ -954,7 +860,18 @@ def translate_chunk_stream(
             choices = getattr(event, "choices", None) or []
             if not choices:
                 continue
-            delta = getattr(choices[0], "delta", None)
+
+            choice = choices[0]
+            # DashScope/OpenAI-compatible streams may send a terminal choice with
+            # finish_reason before the underlying SSE socket is fully closed. If
+            # we ignore that terminal marker, the handler can sit in the next
+            # iterator read until the HTTP read timeout, which looks like a long
+            # pause after the visible translation for every chunk.
+            finish_reason = getattr(choice, "finish_reason", None)
+            if finish_reason:
+                break
+
+            delta = getattr(choice, "delta", None)
             content = getattr(delta, "content", None) if delta else None
             if not content:
                 continue
@@ -991,13 +908,21 @@ def randomized_sensitive_fallback_models():
 SENSITIVE_FALLBACK_MAX_ATTEMPTS = 4
 
 
-def run_sensitive_model_rotation(callback, max_attempts=SENSITIVE_FALLBACK_MAX_ATTEMPTS, allow_mt=True):
+def run_sensitive_model_rotation(
+    callback,
+    max_attempts=SENSITIVE_FALLBACK_MAX_ATTEMPTS,
+    allow_mt=True,
+    deadline=None,
+):
     """Try a few randomly-ordered sensitive-friendly models, then give up.
 
     - Caps total attempts at ``max_attempts`` so we don't burn through the
       entire pool (15 models × per-model request cost) on hopeless inputs.
     - Exits early on quota errors: those won't be cured by trying more models.
     - allow_mt=False 时跳过 qwen-mt-* 模型（用于 extract_terms 等 mt 无法完成的任务）
+    - ``deadline``: monotonic timestamp; iteration stops once exceeded so the
+      caller (typically the SSE handler) still has time for a google fallback
+      before Vercel's 300s budget runs out.
     """
     last_exc = None
     full_order = randomized_sensitive_fallback_models()
@@ -1005,6 +930,8 @@ def run_sensitive_model_rotation(callback, max_attempts=SENSITIVE_FALLBACK_MAX_A
         full_order = [m for m in full_order if not is_qwen_mt_model(m)]
     model_order = full_order[:max_attempts]
     for model in model_order:
+        if deadline_exceeded(deadline):
+            break
         try:
             result = callback(model)
             return result, {
@@ -1025,14 +952,15 @@ def run_sensitive_model_rotation(callback, max_attempts=SENSITIVE_FALLBACK_MAX_A
     raise RuntimeError("敏感内容兼容模型池没有可用模型")
 
 
-def run_sensitive_fallback_models(client, chunk, index, total, previous, glossary):
+def run_sensitive_fallback_models(client, chunk, index, total, previous, glossary, deadline=None):
     return run_sensitive_model_rotation(
         lambda model: translate_chunk(
             client, chunk, index, total, previous,
             glossary=glossary, model=model,
             allow_google_fallback=False,
             enable_internal_retry=False,
-        )
+        ),
+        deadline=deadline,
     )
 
 
@@ -1139,21 +1067,46 @@ def fix_translated_chunks(
     client,
     source_chunks,
     translated_chunks,
+    *,
     fallback_indices=None,
     google_fallback_indices=None,
     skip_fix_indices=None,
     glossary=None,
-    model=MODEL_QUALITY,
+    models=None,
+    deadline=None,
 ):
+    """Per-chunk model rotation + deadline-aware fix pass.
+
+    替代旧版本"外层 _run_with_model_rotation 包裹 + 一遇 400 整批重跑"的实现。
+    新行为：
+
+    - 每个 chunk 在 ``models`` 列表里按顺序自己挑模型；命中 400/quota 立即试下一个。
+    - 全局 ``deadline`` 用完后，剩下未修正的 chunk 原样保留，避免整个 fix 阶段
+      在临界 chunk 上转圈，把后续 chunk 全拖死。
+    - 对带 fallback 标记的 chunk，所有标准 fix 模型都失败时，会再用 narrow prompt
+      逐模型再试一轮，仍然失败才放弃。
+
+    返回 ``(joined_text, meta_dict)``。meta_dict 包含 ``model``、``modelOrder``、
+    ``deadlineExceeded`` 等供前端排查。
+    """
     fallback_set = set(fallback_indices or [])
     google_fallback_set = set(google_fallback_indices or [])
     skip_fix_set = set(skip_fix_indices or [])
     fixed = list(translated_chunks)
     total = len(fixed)
 
+    if not models:
+        models = [MODEL_QUALITY]
+
+    last_model_used = models[0]
+    deadline_was_hit = False
+    failed_chunks = []      # chunks that ran every model and still failed
+    skipped_by_deadline = []  # chunks we never even attempted
+
     for idx, translated in enumerate(translated_chunks):
         chunk_no = idx + 1
         source = source_chunks[idx] if idx < len(source_chunks) else ""
+
         if chunk_no in skip_fix_set:
             if chunk_no in google_fallback_set:
                 fixed[idx] = format_google_fallback_with_source(translated, source)
@@ -1162,46 +1115,110 @@ def fix_translated_chunks(
         used_fallback = chunk_no in fallback_set
         if not contains_korean(translated) and not used_fallback:
             continue
+
+        # Out of budget? Leave remaining chunks as-is rather than risk timing
+        # out the entire serverless invocation.
+        if deadline_exceeded(deadline):
+            deadline_was_hit = True
+            skipped_by_deadline.append(chunk_no)
+            if chunk_no in google_fallback_set:
+                fixed[idx] = format_google_fallback_with_source(translated, source)
+            continue
+
         previous_translation = fixed[idx - 1] if idx > 0 else ""
         next_translation = translated_chunks[idx + 1] if idx < total - 1 else ""
-        try:
-            fixed[idx] = fix_translation_chunk(
-                client,
-                source,
-                translated,
-                previous_translation=previous_translation,
-                next_translation=next_translation,
-                glossary=glossary,
-                used_fallback=used_fallback,
-                index=chunk_no,
-                total=total,
-                model=model,
-            )
-        except Exception:
-            if not used_fallback:
-                raise
+
+        chunk_fixed_text = None
+
+        # Try each model in order. On bad_request / quota we move on; on other
+        # errors we stop trying this chunk to avoid burning budget on a flaky
+        # network condition (the chunk simply keeps its current translation).
+        for model in models:
+            if deadline_exceeded(deadline):
+                deadline_was_hit = True
+                break
             try:
-                fixed[idx] = fix_fallback_names_and_subjects_chunk(
+                chunk_fixed_text = fix_translation_chunk(
                     client,
                     source,
                     translated,
                     previous_translation=previous_translation,
                     next_translation=next_translation,
                     glossary=glossary,
+                    used_fallback=used_fallback,
                     index=chunk_no,
                     total=total,
                     model=model,
                 )
-            except Exception:
+                last_model_used = model
+                break
+            except Exception as exc:
+                if is_quota_error(exc):
+                    continue
+                if is_bad_request_error(exc):
+                    continue
+                # Network / unexpected error: don't keep retrying — preserves
+                # remaining budget for later chunks.
+                break
+
+        if chunk_fixed_text is not None:
+            fixed[idx] = chunk_fixed_text
+        elif used_fallback:
+            # 标准 fix 全军覆没 + 这段又是 fallback 翻译，再用 narrow prompt
+            # 尝试一轮专名/人称的最小修正。
+            narrow_fixed = None
+            for model in models:
+                if deadline_exceeded(deadline):
+                    deadline_was_hit = True
+                    break
+                try:
+                    narrow_fixed = fix_fallback_names_and_subjects_chunk(
+                        client,
+                        source,
+                        translated,
+                        previous_translation=previous_translation,
+                        next_translation=next_translation,
+                        glossary=glossary,
+                        index=chunk_no,
+                        total=total,
+                        model=model,
+                    )
+                    last_model_used = model
+                    break
+                except Exception as exc:
+                    if is_quota_error(exc) or is_bad_request_error(exc):
+                        continue
+                    break
+            if narrow_fixed is not None:
+                fixed[idx] = narrow_fixed
+            else:
                 fixed[idx] = translated
+                failed_chunks.append(chunk_no)
+        else:
+            # 非 fallback chunk 但 fix 失败，保留原翻译
+            fixed[idx] = translated
+            failed_chunks.append(chunk_no)
 
         if chunk_no in google_fallback_set:
             fixed[idx] = format_google_fallback_with_source(fixed[idx], source)
 
-    return "\n\n".join(fixed)
+    meta = {
+        "model": last_model_used,
+        "modelOrder": models,
+        "deadlineExceeded": deadline_was_hit,
+        "failedChunks": failed_chunks,
+        "skippedByDeadline": skipped_by_deadline,
+    }
+    return "\n\n".join(fixed), meta
 
 
 def fix_korean_text(client, text, model=MODEL_QUALITY):
+    """Legacy line-by-line fix path (kept for backwards compatibility).
+
+    Called only when the client didn't send chunked source/translated arrays.
+    The current frontend always sends chunks, so this path is essentially dead,
+    but we leave it intact rather than break ad-hoc API callers.
+    """
     lines = text.splitlines()
     fixed = []
     for idx, line in enumerate(lines):
@@ -1431,24 +1448,41 @@ class handler(BaseHTTPRequestHandler):
         previous,
         glossary,
         model_session_id=None,
+        deadline=None,
     ):
         models = self._ordered_models(tier, model_session_id=model_session_id)
         first_model = models[0]
         last_exc = None
         interruption_retries = 0  # 中断后切模型重试的累计次数
+        any_tokens_sent = False    # 跨重试累计：是否曾向客户端发送过 delta
 
         for model in models:
+            # Deadline 守门：每次进入新模型前都检查一次。如果在重试过程中已经
+            # 向前端 push 过 delta，按"中断"语义抛 StreamingTranslationInterrupted
+            # 让 SSE 处理器发 restart + 进入 sensitive/google 兜底；否则按未发
+            # 任何内容抛 StreamingDeadlineExceeded 直接走兜底。
+            if deadline_exceeded(deadline):
+                if any_tokens_sent or interruption_retries > 0:
+                    raise StreamingTranslationInterrupted(
+                        f"handler deadline exceeded after {interruption_retries} retries"
+                    )
+                if last_exc is not None:
+                    raise last_exc
+                raise StreamingDeadlineExceeded("handler deadline exceeded before any output")
+
             sent_any = False
 
             def on_delta(delta):
-                nonlocal sent_any
+                nonlocal sent_any, any_tokens_sent
                 sent_any = True
+                any_tokens_sent = True
                 self._send_sse_event("delta", {"delta": delta})
 
             try:
                 translated = translate_chunk_stream(
                     client, chunk, index, total, previous,
                     glossary=glossary, model=model, on_delta=on_delta,
+                    deadline=deadline,
                 )
                 status = self._current_model_status(tier)
                 return translated, {
@@ -1495,10 +1529,80 @@ class handler(BaseHTTPRequestHandler):
 
         # 所有模型都试过仍然失败
         if last_exc:
-            if interruption_retries > 0:
+            if any_tokens_sent or interruption_retries > 0:
                 raise StreamingTranslationInterrupted(str(last_exc)) from last_exc
             raise last_exc
         raise RuntimeError("没有可用模型")
+
+    def _send_stream_fallback_result(self, translated, *, note, tier, model_session_id, meta=None):
+        """Emit the final delta + done events after stream phase gave up.
+
+        Shared by the various exception branches in ``_handle_translate_stream``
+        so the SSE shape stays consistent.
+        """
+        self._send_sse_event("delta", {"delta": str(translated)})
+        done_payload = {
+            "ok": True,
+            "translated": str(translated),
+            "note": note,
+        }
+        if meta:
+            done_payload.update(meta)
+        else:
+            done_payload["fallback"] = True
+            done_payload["fallbackType"] = "google"
+            done_payload["modelOrder"] = self._ordered_models(
+                tier, model_session_id=model_session_id,
+            )
+        self._send_sse_event("done", done_payload)
+
+    def _stream_fallback_chain(
+        self,
+        client, chunk, index, total, previous, glossary,
+        tier, model_session_id, overall_deadline,
+    ):
+        """Run sensitive-model fallback then google fallback within budget.
+
+        - Reserves ``GOOGLE_RESERVE_SEC`` for the final google fallback so a
+          slow sensitive-model attempt can't squeeze it out.
+        - If there's no time for the sensitive phase at all, skips straight
+          to google.
+        """
+        remaining = deadline_remaining(overall_deadline)
+
+        # Try sensitive fallback only if we have at least GOOGLE_RESERVE_SEC
+        # buffer left for the google fallback after it.
+        if remaining is None or remaining > GOOGLE_RESERVE_SEC:
+            sensitive_budget = SENSITIVE_FALLBACK_BUDGET_SEC
+            if remaining is not None:
+                sensitive_budget = min(sensitive_budget, remaining - GOOGLE_RESERVE_SEC)
+            if sensitive_budget > 0:
+                sensitive_deadline = time.monotonic() + sensitive_budget
+                try:
+                    translated, meta = run_sensitive_fallback_models(
+                        client, chunk, index, total, previous, glossary or [],
+                        deadline=sensitive_deadline,
+                    )
+                    self._send_stream_fallback_result(
+                        translated,
+                        note="此 chunk 已切换兼容模型完成翻译",
+                        tier=tier,
+                        model_session_id=model_session_id,
+                        meta=meta,
+                    )
+                    return
+                except Exception:
+                    pass  # fall through to google
+
+        # Google fallback (last resort).
+        translated = translate_by_google_split_with_glossary(chunk, glossary or [])
+        self._send_stream_fallback_result(
+            translated,
+            note="此 chunk 使用了机械翻译",
+            tier=tier,
+            model_session_id=model_session_id,
+            meta=None,  # default → fallback=True, fallbackType=google
+        )
 
     def _handle_translate_stream(self, data):
         model_session_id = self._model_session_id(data)
@@ -1518,6 +1622,14 @@ class handler(BaseHTTPRequestHandler):
             status, payload = error_response("MISSING_API_KEY", 500)
             return self._send_json(status, payload)
 
+        # Global handler deadline. Two milestones in one budget:
+        #   - stream_deadline: cap the SSE retry loop (up to 6 retries × 90s
+        #     could otherwise burst past Vercel's 300s ceiling).
+        #   - overall_deadline: leaves room for sensitive + google fallback.
+        handler_start = time.monotonic()
+        overall_deadline = handler_start + HANDLER_TOTAL_BUDGET_SEC
+        stream_deadline = handler_start + STREAM_HANDLER_BUDGET_SEC
+
         self._send_sse_headers()
         self._send_sse_event("meta", {
             "ok": True,
@@ -1531,6 +1643,7 @@ class handler(BaseHTTPRequestHandler):
             translated, meta = self._stream_with_model_rotation(
                 tier, client, chunk, index, total, previous, glossary,
                 model_session_id=model_session_id,
+                deadline=stream_deadline,
             )
             self._send_sse_event("done", {
                 "ok": True,
@@ -1543,57 +1656,39 @@ class handler(BaseHTTPRequestHandler):
             # 客户端已经断开（关闭页面、刷新等），不再写任何事件。
             return None
         except StreamingTranslationInterrupted as exc:
-            # 流式翻译在多次切换模型后仍然中断。先通知前端清空累积，
-            # 然后落到敏感兜底 / Google 兜底，让客户端最终拿到一段完整结果。
-            self._send_sse_event("restart", {
-                "reason": "stream_exhausted",
-                "message": friendly_provider_error(exc),
-            })
+            # 流式翻译在多次切换模型后仍然中断（或 deadline 触发但已发过 delta）。
+            # 先通知前端清空累积，然后跑兜底链。
             try:
-                translated, meta = run_sensitive_fallback_models(
-                    client, chunk, index, total, previous, glossary or [],
+                self._send_sse_event("restart", {
+                    "reason": "stream_exhausted",
+                    "message": friendly_provider_error(exc),
+                })
+            except StreamingClientGoneError:
+                return None
+            try:
+                self._stream_fallback_chain(
+                    client, chunk, index, total, previous, glossary,
+                    tier, model_session_id, overall_deadline,
                 )
-                self._send_sse_event("delta", {"delta": str(translated)})
-                self._send_sse_event("done", {
-                    "ok": True,
-                    "translated": str(translated),
-                    "note": "此 chunk 已切换兼容模型完成翻译",
-                    **meta,
-                })
-            except Exception:
-                translated = translate_by_google_split_with_glossary(chunk, glossary or [])
-                self._send_sse_event("delta", {"delta": str(translated)})
-                self._send_sse_event("done", {
-                    "ok": True,
-                    "translated": str(translated),
-                    "fallback": True,
-                    "fallbackType": "google",
-                    "note": "此 chunk 使用了机械翻译",
-                    "modelOrder": self._ordered_models(tier, model_session_id=model_session_id),
-                })
+            except StreamingClientGoneError:
+                return None
+        except StreamingDeadlineExceeded:
+            # 还没发过 delta，但已经没时间继续主流程了，直接走兜底。
+            try:
+                self._stream_fallback_chain(
+                    client, chunk, index, total, previous, glossary,
+                    tier, model_session_id, overall_deadline,
+                )
+            except StreamingClientGoneError:
+                return None
         except Exception:
             try:
-                translated, meta = run_sensitive_fallback_models(
-                    client, chunk, index, total, previous, glossary or [],
+                self._stream_fallback_chain(
+                    client, chunk, index, total, previous, glossary,
+                    tier, model_session_id, overall_deadline,
                 )
-                self._send_sse_event("delta", {"delta": str(translated)})
-                self._send_sse_event("done", {
-                    "ok": True,
-                    "translated": str(translated),
-                    "note": "此 chunk 已切换兼容模型完成翻译",
-                    **meta,
-                })
-            except Exception:
-                translated = translate_by_google_split_with_glossary(chunk, glossary or [])
-                self._send_sse_event("delta", {"delta": str(translated)})
-                self._send_sse_event("done", {
-                    "ok": True,
-                    "translated": str(translated),
-                    "fallback": True,
-                    "fallbackType": "google",
-                    "note": "此 chunk 使用了机械翻译",
-                    "modelOrder": self._ordered_models(tier, model_session_id=model_session_id),
-                })
+            except StreamingClientGoneError:
+                return None
         return None
 
     def _pick_model(self, data):
@@ -1714,6 +1809,11 @@ class handler(BaseHTTPRequestHandler):
                     status, payload = error_response("MISSING_API_KEY", 500)
                     return self._send_json(status, payload)
 
+                # 非流式 translate 也用一个全局 deadline，保证 sensitive + google
+                # 兜底链能在 300s 内跑完。
+                non_stream_start = time.monotonic()
+                non_stream_deadline = non_stream_start + HANDLER_TOTAL_BUDGET_SEC
+
                 try:
                     translated, meta = self._run_with_model_rotation(
                         tier,
@@ -1735,18 +1835,27 @@ class handler(BaseHTTPRequestHandler):
                         **meta,
                     })
                 except Exception:
-                    try:
-                        translated, meta = run_sensitive_fallback_models(
-                            client, chunk, index, total, previous, glossary or [],
+                    # Reserve some time for google fallback after sensitive.
+                    remaining = deadline_remaining(non_stream_deadline) or 0
+                    if remaining > GOOGLE_RESERVE_SEC:
+                        sensitive_budget = min(
+                            SENSITIVE_FALLBACK_BUDGET_SEC,
+                            remaining - GOOGLE_RESERVE_SEC,
                         )
-                        return self._send_json(200, {
-                            "ok": True,
-                            "translated": str(translated),
-                            "note": "此 chunk 已切换兼容模型完成翻译",
-                            **meta,
-                        })
-                    except Exception:
-                        pass
+                        sensitive_deadline = time.monotonic() + sensitive_budget
+                        try:
+                            translated, meta = run_sensitive_fallback_models(
+                                client, chunk, index, total, previous, glossary or [],
+                                deadline=sensitive_deadline,
+                            )
+                            return self._send_json(200, {
+                                "ok": True,
+                                "translated": str(translated),
+                                "note": "此 chunk 已切换兼容模型完成翻译",
+                                **meta,
+                            })
+                        except Exception:
+                            pass
 
                     translated = translate_by_google_split_with_glossary(chunk, glossary or [])
                     return self._send_json(200, {
@@ -1797,11 +1906,20 @@ class handler(BaseHTTPRequestHandler):
                 skip_fix_index_set = parse_index_set(skip_fix_indices)
                 skipped_fix_indices = sorted(skip_fix_index_set)
 
-                # fix 任务需要 system prompt + 复杂判断，mt 模型不能用
                 if isinstance(source_chunks, list) and isinstance(translated_chunks, list) and translated_chunks:
-                    fixed, meta = self._run_with_model_rotation(
-                        tier,
-                        lambda model: fix_translated_chunks(
+                    # ── 新版：per-chunk 模型轮换 + 全局 deadline ──
+                    #
+                    # 旧实现是 _run_with_model_rotation 包整个 fix_translated_chunks，
+                    # 任何一个 chunk 命中 400 都会把前 N-1 个 chunk 在新模型上重来
+                    # 一遍，最坏情况是 O(chunks × models)。新实现把轮换下沉到
+                    # 每个 chunk 内部，失败一个 chunk 不影响其他 chunk 的进度；
+                    # 全局 deadline 一到，剩下未处理的 chunk 保留原翻译返回。
+                    models = self._ordered_models(
+                        tier, model_session_id=model_session_id, allow_mt=False,
+                    )
+                    fix_deadline = time.monotonic() + FIX_HANDLER_BUDGET_SEC
+                    try:
+                        fixed, meta = fix_translated_chunks(
                             client,
                             [str(chunk) for chunk in source_chunks],
                             [str(chunk) for chunk in translated_chunks],
@@ -1809,13 +1927,31 @@ class handler(BaseHTTPRequestHandler):
                             google_fallback_indices=google_fallback_index_set,
                             skip_fix_indices=skip_fix_index_set,
                             glossary=glossary,
-                            model=model,
-                        ),
-                        rotate_on_bad_request=True,
-                        model_session_id=model_session_id,
-                        allow_mt=False,
-                    )
+                            models=models,
+                            deadline=fix_deadline,
+                        )
+                    except Exception:
+                        # per-chunk 版本对错误已经做了内部吞咽，几乎不会抛到这里；
+                        # 兜底返回原翻译，避免整个修正阶段炸掉。
+                        fixed = translated_text
+                        meta = {
+                            "model": models[0] if models else MODEL_QUALITY,
+                            "modelOrder": models,
+                            "deadlineExceeded": False,
+                            "failedChunks": [],
+                            "skippedByDeadline": [],
+                        }
+
+                    status_info = self._current_model_status(tier)
+                    meta = {
+                        **meta,
+                        "tier": tier,
+                        "switchedModel": meta.get("model") != (models[0] if models else None),
+                        "currentModel": status_info["model"],
+                        "exhaustedModels": status_info["exhaustedModels"],
+                    }
                 else:
+                    # 旧 line-by-line 路径，保留原行为
                     fixed, meta = self._run_with_model_rotation(
                         tier,
                         lambda model: fix_korean_text(client, translated_text, model=model),

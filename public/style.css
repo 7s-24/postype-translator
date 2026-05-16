@@ -227,6 +227,18 @@
       width: 0%;
       transition: width 0.25s linear;
     }
+    .progress-detail {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px dashed #ccc;
+      color: #444;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .progress-detail:empty { display: none; }
     .toast {
       position: fixed;
       right: 18px;
