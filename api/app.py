@@ -699,7 +699,7 @@ def infer_stream_resume_state(source_text: str, streamed_text: str):
         "remainingChunk": remaining_chunk,
     }
 
-def translate_by_google(text: str) -> str:
+def translate_by_google(text: str, deadline=None) -> str:
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {"client": "gtx", "sl": "ko", "tl": "zh-CN", "dt": "t", "q": text[:5000]}
@@ -740,6 +740,35 @@ def is_quota_error(exc: Exception) -> bool:
     if status_code in (402, 429) and any(m in message for m in quota_markers):
         return True
     return any(m in code or m in message for m in quota_markers)
+
+
+def is_stream_unsupported_error(exc: Exception) -> bool:
+    """Best-effort detection for models/endpoints that reject streaming mode."""
+    status_code = getattr(exc, "status_code", None)
+    code = str(getattr(exc, "code", "") or "").lower()
+    message = str(exc).lower()
+    body = str(getattr(exc, "body", "") or "").lower()
+    combined = " ".join([code, message, body])
+    stream_markers = ("stream", "streaming", "sse", "流式")
+    unsupported_markers = (
+        "not support",
+        "does not support",
+        "doesn't support",
+        "unsupported",
+        "not supported",
+        "incompatible",
+        "invalid parameter",
+        "only support",
+        "support non-stream",
+        "non-stream only",
+        "不支持",
+        "暂不支持",
+    )
+    if status_code not in (400, 404, 422):
+        return False
+    return any(marker in combined for marker in stream_markers) and any(
+        marker in combined for marker in unsupported_markers
+    )
 
 
 def is_sensitive_content_error(exc: Exception) -> bool:
@@ -1718,7 +1747,40 @@ class handler(BaseHTTPRequestHandler):
                         self._mark_model_exhausted(tier, model)
                     continue
 
-                # 还没发过 delta 的失败：正常按之前的规则处理
+                # 还没发过 delta 的失败：如果只是当前模型/端点不支持
+                # stream=True，用同一个模型降级为非流式翻译，并在最终 done
+                # 里返回完整 translated。否则按原规则进入外层兜底链。
+                if is_stream_unsupported_error(exc):
+                    try:
+                        translated = translate_chunk(
+                            client, active_chunk, index, total, active_previous,
+                            glossary=glossary, model=model,
+                            allow_google_fallback=False,
+                            enable_internal_retry=False,
+                            deadline=deadline,
+                        )
+                        status = self._current_model_status(tier)
+                        return join_translation_parts(completed_translation, str(translated)), {
+                            "tier": tier,
+                            "model": model,
+                            "switchedModel": model != first_model,
+                            "currentModel": status["model"],
+                            "modelOrder": models,
+                            "exhaustedModels": status["exhaustedModels"],
+                            "interruptionRetries": interruption_retries,
+                            "streamResumeCount": resume_count,
+                            "fallback": True,
+                            "fallbackType": "non_stream_model",
+                            "streamFallback": True,
+                            "streamErrorType": type(exc).__name__,
+                            "streamErrorDetail": str(exc)[:300],
+                        }
+                    except Exception as non_stream_exc:
+                        last_exc = non_stream_exc
+                        if is_quota_error(non_stream_exc):
+                            self._mark_model_exhausted(tier, model)
+                            continue
+
                 if is_quota_error(exc):
                     self._mark_model_exhausted(tier, model)
                     continue
