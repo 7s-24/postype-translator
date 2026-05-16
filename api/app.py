@@ -122,22 +122,84 @@ def error_response(code, status=400, message=None):
         },
     }
 
-# Models that are exposed through the OpenAI-compatible chat endpoint but reject
-# a dedicated system role. Keep prompts as a single user message for them.
-USER_ONLY_ROLE_MODEL_PREFIXES = (
-    "qwen-mt-",
-)
+# ---------------------------------------------------------------------------
+# Model family detection
+# ---------------------------------------------------------------------------
+# Qwen-MT 系列是阿里云专门做的翻译模型：
+#   - messages 只能有一条 user，content 必须是纯源文
+#   - 不支持 system / 多轮 / temperature
+#   - 语言、术语必须通过 extra_body.translation_options 传递
+QWEN_MT_MODEL_PREFIXES = ("qwen-mt-",)
+
+# 保留旧名作为别名，避免外部引用断裂
+USER_ONLY_ROLE_MODEL_PREFIXES = QWEN_MT_MODEL_PREFIXES
+
+
+def is_qwen_mt_model(model: str) -> bool:
+    return any((model or "").startswith(prefix) for prefix in QWEN_MT_MODEL_PREFIXES)
+
 
 def model_uses_user_only_messages(model: str) -> bool:
-    return any((model or "").startswith(prefix) for prefix in USER_ONLY_ROLE_MODEL_PREFIXES)
+    # 保留旧名供已有代码调用
+    return is_qwen_mt_model(model)
+
+
+# Deepseek 系列不识别 /no_think，原样输出会被当作普通文本忽略
+# 但为了干净，仍然只给 qwen3 / qwq 系列追加
+def model_supports_no_think(model: str) -> bool:
+    model = (model or "").lower()
+    if not model:
+        return False
+    if is_qwen_mt_model(model):
+        return False
+    return model.startswith("qwen") or model.startswith("qwq")
+
+
+NO_THINK_SUFFIX = "\n\n/no_think"
+
 
 def build_chat_messages(system_prompt: str, user_prompt: str, model: str) -> list:
-    if model_uses_user_only_messages(model):
-        return [{"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}]
+    """普通 chat 模型的消息构造。
+
+    Qwen-MT 模型不应走这里——它们必须走 build_qwen_mt_request。
+    若误调用，这里只做兜底（去掉 system，避免 translation_options 失效）。
+    """
+    if is_qwen_mt_model(model):
+        return [{"role": "user", "content": user_prompt}]
+
+    suffix = NO_THINK_SUFFIX if model_supports_no_think(model) else ""
     return [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
+        {"role": "user", "content": user_prompt + suffix},
     ]
+
+
+def build_qwen_mt_request(chunk: str, glossary: list = None) -> dict:
+    """构造 Qwen-MT 专用的请求参数。
+
+    返回值可直接 **kwargs 解包到 client.chat.completions.create。
+    不包含 model 字段，调用方自行传入。
+    """
+    translation_options = {
+        "source_lang": "Korean",
+        "target_lang": "Chinese",
+    }
+
+    if glossary:
+        relevant = filter_glossary_for_chunk(glossary, chunk)
+        terms = [
+            {"source": item["ko"], "target": item["zh"]}
+            for item in relevant
+            if item.get("ko") and item.get("zh")
+        ]
+        if terms:
+            translation_options["terms"] = terms
+
+    return {
+        "messages": [{"role": "user", "content": chunk}],
+        "extra_body": {"translation_options": translation_options},
+    }
+
 
 def is_bad_request_error(exc: Exception) -> bool:
     return getattr(exc, "status_code", None) == 400
@@ -148,72 +210,63 @@ def friendly_provider_error(exc: Exception) -> str:
     return ERRORS["PROVIDER_UNAVAILABLE"]
 
 # ---------------------------------------------------------------------------
-# System prompts
+# System prompts（仅给非 mt 模型使用）
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责将韩文正文翻译成简体中文。
+SYSTEM_PROMPT = """你是韩译中同人小说翻译器。
 
-【核心要求】
-- 忠实翻译原文，不删减、不总结、不规避、不弱化。
-- 保留原文的情绪、暧昧张力、人物关系、语气词、停顿、喘息、拟声词。
-- 不添加原文没有的信息。
-- 不解释，不加注释，不输出前缀。
-- 只输出译文。
+<rules>
+- 忠实翻译原文，保留情绪、张力、语气词、拟声词、停顿、喘息。
+- 不删减、不总结、不规避、不弱化、不添加原文没有的信息。
+- 原文省略主语时，中文也省略；不擅自补主语。
+</rules>
 
-【文风要求】
-- 所有内容按原文翻译，不额外加重，也不弱化。
-- 不确定说话人时，不要擅自添加主语。
-- 原文故意省略主语时，中文也可以适度省略。
+<output>仅输出简体中文译文，无前缀、无注释、无解释。</output>
 """
 
-EXTRACT_TERMS_PROMPT = """你是专业韩文小说高频实词术语翻译器。系统已经从文章中按出现频率抽出了候选韩文实词，你只需要逐项判断、过滤并翻译这些候选词。
+EXTRACT_TERMS_PROMPT = """你是韩文小说术语翻译器。系统已给出候选词，你只在候选范围内筛选并翻译。
 
-处理原则：
-1. 只处理【候选高频词】里的词，不要从上下文中自行新增词条。
-2. 保留适合作为翻译术语表的高频实词：人名、昵称、称呼、地名、组织名、头衔、物品、作品名、虚构概念，以及反复出现且需要统一译法的名词/实义词。
-3. 必须过滤掉没有术语价值的连接词、助词残片、语尾残片、代词、泛用副词、泛用动词/形容词、数字量词、普通寒暄和过于日常的词。
-4. 如果某个候选词看起来像被韩文助词或语尾粘连了，请在 ko 字段中使用更干净的原形/词干，并给出自然的简体中文译法。
-5. 不确定是否有意义时，宁可过滤掉。
-6. 必须过滤“脑袋/眼睛/手/脸/嘴”等普通身体部位、普通家具、普通动作对象等直译即可的日常名词；只有它们作为角色昵称、专有称号、虚构概念或引号内专名出现时才保留。
-7. 标注为【引号内出现】的词条，是原文用「」『』《》【】[] 等成对引号特意框住的内容，大概率是专有名词/技能/作品/物品/组织，请优先保留并翻译；只有在明显是普通台词强调或语气词时才过滤。
+<rules>
+- 保留：人名、昵称、称呼、地名、组织、头衔、物品、作品名、虚构概念，以及需统一译法的反复出现实词。
+- 标注【引号内出现】的词条优先保留，仅当明显是普通台词强调时才过滤。
+- 过滤：连接词、助词/语尾残片、代词、泛用副词/动词/形容词、数字量词、普通寒暄、普通身体部位/家具/日常名词（除非作昵称或专名）。
+- 候选词若被助词粘连，ko 字段写干净的原形/词干。
+- 不确定时过滤掉。
+- 不要从上下文新增候选词。
+</rules>
 
-输出要求：
-- 只输出 JSON 数组，不要任何其他文字、markdown 标记或代码块符号
-- 每项格式：{"ko": "韩文原文", "zh": "建议中文翻译", "category": "类别"}
-- category 可选值：人名、地名、技能、称号、物品、组织、称呼、其他
-- 如果没有可用词条，返回空数组 []
+<output>
+仅输出 JSON 数组，无 markdown、无代码块、无其他文字。
+每项格式：{"ko":"韩文","zh":"中文","category":"人名|地名|技能|称号|物品|组织|称呼|其他"}
+无可用词条时返回 []。
+</output>
 """
 
-FIX_SYSTEM_PROMPT = """你是专业韩文同人小说翻译器，负责对已经翻译成中文的文本做最小必要修正。
+FIX_SYSTEM_PROMPT = """你是中文译文最小修正器。
 
-【修正范围】
-- 必须修正文本中的韩文残留，把残留韩文翻译成简体中文。
-- 对照韩文原文和术语表，只检查句子中逻辑明显奇怪、称呼明显不一致或与术语表冲突的部分，修正疑似术语误译；不要借机重译通顺的句子。
-- 如果文本来自自动/谷歌翻译，请重点核对人称、称呼、说话对象和主语关系，修正明显的“我/你/他/她/他们/她们”等人称错误。
-- 尤其检查谷歌翻译擅自补出的不必要主语；原文没有明确主语、中文省略也自然时，优先删掉多余主语。
-- 无法从原文和上下文明确判断的问题，保持现有中文不变。
+<rules>
+- 把残留韩文翻译成简体中文。
+- 对照术语表，仅修正与术语表冲突或明显误译的专名/称呼。
+- 仅修正与原文/上下文明显冲突的人称（我/你/他/她/他们/她们）。
+- 删除谷歌翻译多余补出的主语（原文无主语且中文省略自然时）。
+- 其余通顺的中文一律保留原样，保留换行和段落结构。
+- 无法从原文和上下文明确判断时，保持现有中文不变。
+</rules>
 
-【输出要求】
-- 保留其余已经正确的中文内容原样，尽量保留原有换行和段落结构。
-- 不要解释、不加注释、不输出前缀。
-- 只返回修正后的中文结果。
+<output>仅输出修正后的中文，无前缀、无注释、无解释。</output>
 """
 
-SIMPLE_FALLBACK_FIX_SYSTEM_PROMPT = """你只负责对谷歌/机械翻译后的中文做极窄范围复核。
+SIMPLE_FALLBACK_FIX_SYSTEM_PROMPT = """你是机翻中文的极窄修正器。
 
-【只允许修正】
-- 人名、称呼、专有名词与术语表明显冲突的问题。
-- 我/你/他/她/他们/她们等人称与韩文原文或上下文明显冲突的问题。
-- 谷歌翻译擅自补出的多余主语；原文没有明确主语且中文省略自然时，删掉多余主语。
+<rules>
+- 仅修正：与术语表冲突的专名/称呼。
+- 仅修正：与原文/上下文明显冲突的人称。
+- 仅删除：谷歌翻译多余补出的主语。
+- 不重译、不润色、不补写、不分析敏感描写本身。
+- 无法明确判断时，保持原样。
+</rules>
 
-【禁止】
-- 不要重译整段，不要润色风格，不要补写内容。
-- 不要分析或改写敏感描写本身；只看人名、人称和主语。
-- 无法明确判断时，必须保持当前译文原样。
-
-【输出】
-- 只返回修正后的当前中文译文。
-- 不要解释、不加注释、不输出前缀。
+<output>仅输出修正后的中文，无前缀、无注释、无解释。</output>
 """
 
 
@@ -498,21 +551,24 @@ def build_term_translation_prompt(text: str, candidates: list) -> str:
     quoted_tokens = {token for token, _ in extract_quoted_terms(text or "")}
     candidate_lines = []
     for token, count in candidates:
-        if token in quoted_tokens:
-            suffix = "（引号内出现，大概率是专有术语）"
-        else:
-            suffix = f"（出现 {count} 次）"
+        suffix = "（引号内出现）" if token in quoted_tokens else f"（{count}次）"
         candidate_lines.append(f"- {token}{suffix}")
     sampled = sample_text(text, max_chars=TERM_CONTEXT_SAMPLE_CHARS)
     return (
-        "【候选高频词】\n"
+        "<candidates>\n"
         + "\n".join(candidate_lines)
-        + "\n\n【上下文节选，仅用于判断词义，不要从这里新增词条】\n"
+        + "\n</candidates>\n\n"
+        "<context_sample>\n"
         + sampled
+        + "\n</context_sample>"
     )
 
 
 def extract_terms(client, text: str, model: str = MODEL_QUALITY) -> list:
+    # Qwen-MT 只会做翻译，无法完成"过滤 + 分类 + 输出 JSON"的复合任务
+    if is_qwen_mt_model(model):
+        raise RuntimeError(f"extract_terms 不支持 Qwen-MT 模型: {model}")
+
     candidates = extract_frequent_content_words(text)
     if not candidates:
         return []
@@ -718,6 +774,26 @@ def split_chunk_further(chunk: str, max_chars: int = 800) -> list:
     return sub_chunks if sub_chunks else [chunk]
 
 
+def build_translation_user_prompt(chunk, index, total, previous_translation="", glossary=None):
+    """非 mt 模型的翻译 user prompt（XML 结构化）。"""
+    parts = []
+    if previous_translation:
+        parts.append(
+            "<previous_translation>\n"
+            f"{previous_translation[-2000:]}\n"
+            "</previous_translation>"
+        )
+    if glossary:
+        gloss_section = build_glossary_prompt_section(glossary, chunk=chunk)
+        if gloss_section:
+            parts.append(f"<glossary>\n{gloss_section}\n</glossary>")
+    parts.append(
+        f"<task>翻译第 {index}/{total} 段韩文，承接上文称呼/语气/文风，术语必须用 glossary 中的译法。</task>"
+    )
+    parts.append(f"<source>\n{chunk}\n</source>")
+    return "\n\n".join(parts)
+
+
 def translate_chunk(
     client, chunk, index, total,
     previous_translation="",
@@ -727,33 +803,20 @@ def translate_chunk(
     allow_google_fallback=True,
     enable_internal_retry=True,
 ):
-    context = ""
-    if previous_translation:
-        context = (
-            "【上一段译文结尾，仅用于保持上下文一致，不要重复翻译】\n"
-            f"{previous_translation[-2000:]}\n\n"
-        )
-
-    glossary_section = build_glossary_prompt_section(glossary, chunk=chunk) if glossary else ""
-    if glossary_section:
-        glossary_section += "\n\n"
-
-    user_prompt = (
-        f"{context}{glossary_section}"
-        f"下面是韩文小说正文的第 {index}/{total} 段。\n\n"
-        "请直接翻译成简体中文。注意承接上一段的人物称呼、语气、情绪和文风，"
-        "但不要重复上一段内容。\n"
-        "特别注意保持术语和专有名词的翻译一致性，"
-        "如果术语表中有对应条目，必须使用术语表中的译法。\n\n"
-        f"【当前原文】\n{chunk}\n"
-    )
-
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=build_chat_messages(SYSTEM_PROMPT, user_prompt, model),
-            temperature=0.2,
-        )
+        if is_qwen_mt_model(model):
+            # mt 系列：纯源文 + translation_options，舍弃上下文（mt 不支持多轮）
+            mt_kwargs = build_qwen_mt_request(chunk, glossary=glossary)
+            response = client.chat.completions.create(model=model, **mt_kwargs)
+        else:
+            user_prompt = build_translation_user_prompt(
+                chunk, index, total, previous_translation, glossary,
+            )
+            response = client.chat.completions.create(
+                model=model,
+                messages=build_chat_messages(SYSTEM_PROMPT, user_prompt, model),
+                temperature=0.2,
+            )
         return response.choices[0].message.content.strip()
     except Exception as exc:
         if is_quota_error(exc) or is_sensitive_content_error(exc):
@@ -793,29 +856,6 @@ def translate_chunk(
         raise
 
 
-def build_translation_user_prompt(chunk, index, total, previous_translation="", glossary=None):
-    context = ""
-    if previous_translation:
-        context = (
-            "【上一段译文结尾，仅用于保持上下文一致，不要重复翻译】\n"
-            f"{previous_translation[-2000:]}\n\n"
-        )
-
-    glossary_section = build_glossary_prompt_section(glossary, chunk=chunk) if glossary else ""
-    if glossary_section:
-        glossary_section += "\n\n"
-
-    return (
-        f"{context}{glossary_section}"
-        f"下面是韩文小说正文的第 {index}/{total} 段。\n\n"
-        "请直接翻译成简体中文。注意承接上一段的人物称呼、语气、情绪和文风，"
-        "但不要重复上一段内容。\n"
-        "特别注意保持术语和专有名词的翻译一致性，"
-        "如果术语表中有对应条目，必须使用术语表中的译法。\n\n"
-        f"【当前原文】\n{chunk}\n"
-    )
-
-
 def translate_chunk_stream(
     client, chunk, index, total,
     previous_translation="",
@@ -824,15 +864,23 @@ def translate_chunk_stream(
     on_delta=None,
 ):
     """Translate a chunk through DashScope's OpenAI-compatible streaming API."""
-    user_prompt = build_translation_user_prompt(
-        chunk, index, total, previous_translation, glossary,
-    )
-    response = client.chat.completions.create(
-        model=model,
-        messages=build_chat_messages(SYSTEM_PROMPT, user_prompt, model),
-        temperature=0.2,
-        stream=True,
-    )
+    if is_qwen_mt_model(model):
+        mt_kwargs = build_qwen_mt_request(chunk, glossary=glossary)
+        response = client.chat.completions.create(
+            model=model,
+            stream=True,
+            **mt_kwargs,
+        )
+    else:
+        user_prompt = build_translation_user_prompt(
+            chunk, index, total, previous_translation, glossary,
+        )
+        response = client.chat.completions.create(
+            model=model,
+            messages=build_chat_messages(SYSTEM_PROMPT, user_prompt, model),
+            temperature=0.2,
+            stream=True,
+        )
 
     parts = []
     for event in response:
@@ -866,15 +914,18 @@ def randomized_sensitive_fallback_models():
 SENSITIVE_FALLBACK_MAX_ATTEMPTS = 4
 
 
-def run_sensitive_model_rotation(callback, max_attempts=SENSITIVE_FALLBACK_MAX_ATTEMPTS):
+def run_sensitive_model_rotation(callback, max_attempts=SENSITIVE_FALLBACK_MAX_ATTEMPTS, allow_mt=True):
     """Try a few randomly-ordered sensitive-friendly models, then give up.
 
     - Caps total attempts at ``max_attempts`` so we don't burn through the
       entire pool (15 models × per-model request cost) on hopeless inputs.
     - Exits early on quota errors: those won't be cured by trying more models.
+    - allow_mt=False 时跳过 qwen-mt-* 模型（用于 extract_terms 等 mt 无法完成的任务）
     """
     last_exc = None
     full_order = randomized_sensitive_fallback_models()
+    if not allow_mt:
+        full_order = [m for m in full_order if not is_qwen_mt_model(m)]
     model_order = full_order[:max_attempts]
     for model in model_order:
         try:
@@ -917,13 +968,13 @@ def contains_korean(text: str) -> bool:
 
 
 def fix_korean_line(client, line, previous="", next_line="", model=MODEL_QUALITY):
+    if is_qwen_mt_model(model):
+        raise RuntimeError(f"fix_korean_line 不支持 Qwen-MT 模型: {model}")
     prompt = (
-        "下面是一段已经翻译成中文的文本，其中仍有韩文残留。\n"
-        "请只翻译文本中的韩文部分为简体中文，保留其他已经是中文的内容原样。\n"
-        "不要添加注释、说明、前缀或额外内容。不要改写已是中文的部分。\n\n"
-        f"上一行（仅供参考）：{previous}\n"
-        f"当前行：{line}\n"
-        f"下一行（仅供参考）：{next_line}\n"
+        "<task>将当前行的韩文残留翻译成中文，其余中文部分原样保留。</task>\n\n"
+        f"<previous>{previous}</previous>\n"
+        f"<current>{line}</current>\n"
+        f"<next>{next_line}</next>"
     )
     response = client.chat.completions.create(
         model=model,
@@ -945,25 +996,21 @@ def fix_translation_chunk(
     total=1,
     model=MODEL_QUALITY,
 ):
+    if is_qwen_mt_model(model):
+        raise RuntimeError(f"fix_translation_chunk 不支持 Qwen-MT 模型: {model}")
     glossary_section = build_glossary_prompt_section(glossary, chunk=source_text) if glossary else ""
     fallback_note = (
-        "该段曾使用自动/谷歌翻译兜底，请特别核对人称、称呼、说话对象和主语关系。"
+        "本段经谷歌兜底，重点核对人称/称呼/主语。"
         if used_fallback else
-        "该段不一定来自自动翻译；如无明确错误，请尽量保持现有中文。"
+        "本段未必经过机翻；无明确错误时保持原样。"
     )
     prompt = (
-        f"下面是第 {index}/{total} 段的韩文原文和当前中文译文。请做最小必要修正。\n"
-        f"{fallback_note}\n\n"
-        f"{glossary_section}\n\n"
-        "【上一段中文译文，仅供判断人称和称呼】\n"
-        f"{previous_translation[-1200:]}\n\n"
-        "【韩文原文】\n"
-        f"{source_text}\n\n"
-        "【当前中文译文】\n"
-        f"{translated_text}\n\n"
-        "【下一段中文译文，仅供判断人称和称呼】\n"
-        f"{next_translation[:1200]}\n\n"
-        "请只输出修正后的当前中文译文。"
+        f"<task>修正第 {index}/{total} 段。{fallback_note}</task>\n\n"
+        f"<glossary>\n{glossary_section}\n</glossary>\n\n"
+        f"<previous_translation>\n{previous_translation[-1200:]}\n</previous_translation>\n\n"
+        f"<source>\n{source_text}\n</source>\n\n"
+        f"<current_translation>\n{translated_text}\n</current_translation>\n\n"
+        f"<next_translation>\n{next_translation[:1200]}\n</next_translation>"
     )
     response = client.chat.completions.create(
         model=model,
@@ -984,25 +1031,16 @@ def fix_fallback_names_and_subjects_chunk(
     total=1,
     model=MODEL_QUALITY,
 ):
+    if is_qwen_mt_model(model):
+        raise RuntimeError(f"fix_fallback_names_and_subjects_chunk 不支持 Qwen-MT 模型: {model}")
     glossary_section = build_glossary_prompt_section(glossary, chunk=source_text) if glossary else ""
     prompt = (
-        f"下面是第 {index}/{total} 段的韩文原文和谷歌/机械翻译译文。上一次完整修正可能失败，"
-        "这次只做非常窄的检查。\n\n"
-        "【只允许处理】\n"
-        "1. 人名、称呼、专有名词是否违背术语表。\n"
-        "2. 我/你/他/她/他们/她们等人称是否和原文、上下文明显冲突。\n"
-        "3. 谷歌翻译擅自补出的多余主语；原文没有明确主语且中文省略自然时，删掉多余主语。\n\n"
-        "不要翻译、补写或润色其他内容；不要处理敏感描写本身；无法明确判断时保持当前译文原样。\n\n"
-        f"{glossary_section}\n\n"
-        "【上一段中文译文，仅供判断人称和称呼】\n"
-        f"{previous_translation[-800:]}\n\n"
-        "【韩文原文】\n"
-        f"{source_text}\n\n"
-        "【当前中文译文】\n"
-        f"{translated_text}\n\n"
-        "【下一段中文译文，仅供判断人称和称呼】\n"
-        f"{next_translation[:800]}\n\n"
-        "请只输出修正后的当前中文译文。"
+        f"<task>窄修正第 {index}/{total} 段：专名/人称/多余主语，其余一律不动。</task>\n\n"
+        f"<glossary>\n{glossary_section}\n</glossary>\n\n"
+        f"<previous_translation>\n{previous_translation[-800:]}\n</previous_translation>\n\n"
+        f"<source>\n{source_text}\n</source>\n\n"
+        f"<current_translation>\n{translated_text}\n</current_translation>\n\n"
+        f"<next_translation>\n{next_translation[:800]}\n</next_translation>"
     )
     response = client.chat.completions.create(
         model=model,
@@ -1197,18 +1235,22 @@ class handler(BaseHTTPRequestHandler):
             "exhaustedModels": list(tier_state.get("exhaustedModels", [])),
         }
 
-    def _ordered_models(self, tier, model_session_id=None):
+    def _ordered_models(self, tier, model_session_id=None, allow_mt=True):
         status = self._current_model_status(tier)
         models = status["models"]
         exhausted = set(status["exhaustedModels"])
 
+        def _filter_mt(seq):
+            return seq if allow_mt else [m for m in seq if not is_qwen_mt_model(m)]
+
         if model_session_id:
             active = [model for model in models if model not in exhausted]
+            active = _filter_mt(active)
             if active:
                 rng = random.Random(f"{tier}:{model_session_id}")
                 rng.shuffle(active)
                 return active
-            return models
+            return _filter_mt(models) or models
 
         start = status["currentIndex"]
         active = [
@@ -1216,7 +1258,8 @@ class handler(BaseHTTPRequestHandler):
             for offset in range(len(models))
             if models[(start + offset) % len(models)] not in exhausted
         ]
-        return active or models
+        active = _filter_mt(active)
+        return active or _filter_mt(models) or models
 
     def _model_session_id(self, data):
         value = data.get("modelSessionId") or data.get("model_session_id")
@@ -1242,8 +1285,13 @@ class handler(BaseHTTPRequestHandler):
             tier_state["currentIndex"] = 0
         self._save_model_state(state)
 
-    def _run_with_model_rotation(self, tier, callback, rotate_on_bad_request=False, model_session_id=None):
-        models = self._ordered_models(tier, model_session_id=model_session_id)
+    def _run_with_model_rotation(
+        self, tier, callback,
+        rotate_on_bad_request=False,
+        model_session_id=None,
+        allow_mt=True,
+    ):
+        models = self._ordered_models(tier, model_session_id=model_session_id, allow_mt=allow_mt)
         first_model = models[0]
         last_exc = None
 
@@ -1468,20 +1516,23 @@ class handler(BaseHTTPRequestHandler):
                     return self._send_json(status, payload)
                 # 术语提取先用轻量模型池：候选词已经在本地按频率和停用词收窄，
                 # 让模型只做快速审核/翻译，避免在正式翻译前等待过久。
+                # 注意：mt 系列只能翻译、不能筛选/分类，必须跳过。
                 try:
                     terms, meta = self._run_with_model_rotation(
                         "light",
                         lambda model: extract_terms(client, text, model=model),
                         model_session_id=model_session_id,
+                        allow_mt=False,
                     )
                 except Exception:
                     try:
                         terms, meta = run_sensitive_model_rotation(
-                            lambda model: extract_terms(client, text, model=model)
+                            lambda model: extract_terms(client, text, model=model),
+                            allow_mt=False,
                         )
                     except Exception:
                         terms, meta = [], {
-                            "modelOrder": self._ordered_models("light", model_session_id=model_session_id),
+                            "modelOrder": self._ordered_models("light", model_session_id=model_session_id, allow_mt=False),
                         }
                 return self._send_json(200, {"ok": True, "terms": terms, **meta})
 
@@ -1575,6 +1626,7 @@ class handler(BaseHTTPRequestHandler):
                 if not isinstance(google_fallback_indices, list):
                     google_fallback_indices = []
 
+                # fix 任务需要 system prompt + 复杂判断，mt 模型不能用
                 if isinstance(source_chunks, list) and isinstance(translated_chunks, list) and translated_chunks:
                     fixed, meta = self._run_with_model_rotation(
                         tier,
@@ -1589,6 +1641,7 @@ class handler(BaseHTTPRequestHandler):
                         ),
                         rotate_on_bad_request=True,
                         model_session_id=model_session_id,
+                        allow_mt=False,
                     )
                 else:
                     fixed, meta = self._run_with_model_rotation(
@@ -1596,6 +1649,7 @@ class handler(BaseHTTPRequestHandler):
                         lambda model: fix_korean_text(client, translated_text, model=model),
                         rotate_on_bad_request=True,
                         model_session_id=model_session_id,
+                        allow_mt=False,
                     )
                 return self._send_json(200, {"ok": True, "fixed_text": fixed, **meta})
 
