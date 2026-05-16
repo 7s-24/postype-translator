@@ -282,8 +282,6 @@ async function postJSONStream(body, onDelta, callbacks = {}) {
   let lastDeltaDebugAt = 0;
   let lastActivityAt = performance.now();
   let readPhase = "等待首个流式事件";
-  let streamClosed = false;
-  let stoppedAfterDone = false;
 
   const markActivity = (phase) => {
     lastActivityAt = performance.now();
@@ -358,7 +356,6 @@ async function postJSONStream(body, onDelta, callbacks = {}) {
   try {
     while (true) {
       const { value, done } = await reader.read();
-      streamClosed = done;
       markActivity(done ? "响应流关闭" : "正在解析服务端事件");
       buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
       const lines = buffer.split(/\r?\n/);
@@ -375,29 +372,21 @@ async function postJSONStream(body, onDelta, callbacks = {}) {
       }
 
       if (donePayload && !done) {
-        stoppedAfterDone = true;
-        break;
+        readPhase = "已收到 done，等待后端关闭响应流";
       }
       if (done) break;
     }
   } finally {
     clearInterval(stallTimer);
-    if (stoppedAfterDone && !streamClosed) {
-      void reader.cancel().catch(() => {});
-    }
   }
 
-  if (stoppedAfterDone) {
-    debug("收到 done 后已主动结束本段请求，不再等待响应流关闭", { phase: "stopped_after_done" });
-  } else {
-    debug("响应流已关闭，准备检查 done 结果", { phase: "stream_closed" });
+  debug("响应流已关闭，准备检查 done 结果", { phase: "stream_closed" });
 
-    if (buffer) {
-      if (buffer.startsWith("data:")) currentData.push(buffer.slice(5).replace(/^ /, ""));
-      else if (buffer.startsWith("event:")) currentEvent = buffer.slice(6).trim() || "message";
-    }
-    dispatchEvent();
+  if (buffer) {
+    if (buffer.startsWith("data:")) currentData.push(buffer.slice(5).replace(/^ /, ""));
+    else if (buffer.startsWith("event:")) currentEvent = buffer.slice(6).trim() || "message";
   }
+  dispatchEvent();
 
   if (!donePayload || donePayload.ok === false || donePayload.error) {
     debug("未拿到有效 done，准备抛出 STREAM_ERROR", { phase: "missing_done" });

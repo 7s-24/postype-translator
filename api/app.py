@@ -1379,12 +1379,23 @@ class handler(BaseHTTPRequestHandler):
     def _send_sse_headers(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "close")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
+
+    def _finish_sse_response(self):
+        """Flush and force-close the serverless SSE response after terminal events."""
+        try:
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+        # BaseHTTPRequestHandler otherwise honors HTTP/1.1 keep-alive.  In
+        # Vercel serverless this can leave the invocation alive even after the
+        # client has already consumed the terminal ``done`` event.
+        self.close_connection = True
 
     def _send_sse_event(self, event, data):
         # 关键：data 字段值里如果包含 \n，按 SSE 规范要拆成多行 `data:` 但前端
@@ -1825,77 +1836,86 @@ class handler(BaseHTTPRequestHandler):
         overall_deadline = handler_start + HANDLER_TOTAL_BUDGET_SEC
         stream_deadline = handler_start + STREAM_HANDLER_BUDGET_SEC
 
-        self._send_sse_headers()
-        self._send_sse_event("meta", {
-            "ok": True,
-            "status": "started",
-            "index": index,
-            "total": total,
-            "modelOrder": self._ordered_models(tier, model_session_id=model_session_id),
-        })
-
         try:
-            translated, meta = self._stream_with_model_rotation(
-                tier, client, chunk, index, total, previous, glossary,
-                model_session_id=model_session_id,
-                deadline=stream_deadline,
-            )
-            self._send_sse_event("done", {
-                "ok": True,
-                "translated": str(translated),
-                "fallback": False,
-                "fallbackType": "",
-                **meta,
-            })
-        except StreamingClientGoneError:
-            # 客户端已经断开（关闭页面、刷新等），不再写任何事件。
-            return None
-        except StreamingTranslationInterrupted as exc:
-            # 流式翻译在多次切换模型后仍然中断（或 deadline 触发但已发过 delta）。
-            # 如果前面已经按段落保留了部分译文，只兜底剩余原文；否则清空当前累积后兜底整段。
-            prefix = getattr(exc, "partial_translation", "") or ""
-            remaining_chunk = getattr(exc, "remaining_chunk", "") or chunk
             try:
-                self._send_sse_event("replace", {
-                    "reason": "stream_exhausted",
-                    "text": prefix,
-                    "message": friendly_provider_error(exc),
+                self._send_sse_headers()
+                self._send_sse_event("meta", {
+                    "ok": True,
+                    "status": "started",
+                    "index": index,
+                    "total": total,
+                    "modelOrder": self._ordered_models(tier, model_session_id=model_session_id),
+                })
+
+                translated, meta = self._stream_with_model_rotation(
+                    tier, client, chunk, index, total, previous, glossary,
+                    model_session_id=model_session_id,
+                    deadline=stream_deadline,
+                )
+                self._send_sse_event("done", {
+                    "ok": True,
+                    "translated": str(translated),
+                    "fallback": False,
+                    "fallbackType": "",
+                    **meta,
                 })
             except StreamingClientGoneError:
+                # 客户端已经断开（关闭页面、刷新等），不再写任何事件。
                 return None
-            try:
-                self._stream_fallback_chain(
-                    client,
-                    remaining_chunk,
-                    index,
-                    total,
-                    join_translation_parts(previous, prefix),
-                    glossary,
-                    tier,
-                    model_session_id,
-                    overall_deadline,
-                    prefix=prefix,
-                )
-            except StreamingClientGoneError:
-                return None
-        except StreamingDeadlineExceeded:
-            # 还没发过 delta，但已经没时间继续主流程了，直接走兜底。
-            try:
-                self._stream_fallback_chain(
-                    client, chunk, index, total, previous, glossary,
-                    tier, model_session_id, overall_deadline,
-                )
-            except StreamingClientGoneError:
-                return None
-        except Exception:
-            try:
-                self._stream_fallback_chain(
-                    client, chunk, index, total, previous, glossary,
-                    tier, model_session_id, overall_deadline,
-                )
-            except StreamingClientGoneError:
-                return None
-        return None
+            except StreamingTranslationInterrupted as exc:
+                # 流式翻译在多次切换模型后仍然中断（或 deadline 触发但已发过 delta）。
+                # 如果前面已经按段落保留了部分译文，只兜底剩余原文；否则清空当前累积后兜底整段。
+                prefix = getattr(exc, "partial_translation", "") or ""
+                remaining_chunk = getattr(exc, "remaining_chunk", "") or chunk
+                try:
+                    self._send_sse_event("replace", {
+                        "reason": "stream_exhausted",
+                        "text": prefix,
+                        "message": friendly_provider_error(exc),
+                    })
+                except StreamingClientGoneError:
+                    return None
+                try:
+                    self._stream_fallback_chain(
+                        client,
+                        remaining_chunk,
+                        index,
+                        total,
+                        join_translation_parts(previous, prefix),
+                        glossary,
+                        tier,
+                        model_session_id,
+                        overall_deadline,
+                        prefix=prefix,
+                    )
+                except StreamingClientGoneError:
+                    return None
+            except StreamingDeadlineExceeded:
+                # 还没发过 delta，但已经没时间继续主流程了，直接走兜底。
+                try:
+                    self._stream_fallback_chain(
+                        client, chunk, index, total, previous, glossary,
+                        tier, model_session_id, overall_deadline,
+                    )
+                except StreamingClientGoneError:
+                    return None
+            except Exception:
+                try:
+                    self._stream_fallback_chain(
+                        client, chunk, index, total, previous, glossary,
+                        tier, model_session_id, overall_deadline,
+                    )
+                except StreamingClientGoneError:
+                    return None
+            return None
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            self._finish_sse_response()
 
     def _pick_model(self, data):
         return self._current_model_status(self._tier_name(data))["model"]
