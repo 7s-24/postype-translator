@@ -1321,6 +1321,10 @@ class handler(BaseHTTPRequestHandler):
             raise last_exc
         raise RuntimeError("没有可用模型")
 
+    # 流式翻译被中断后，最多尝试切换的模型数量。
+    # 防止个别 chunk 在多个模型上反复中断导致请求时间爆炸。
+    STREAM_INTERRUPTION_MAX_RETRIES = 2
+
     def _stream_with_model_rotation(
         self,
         tier,
@@ -1335,6 +1339,7 @@ class handler(BaseHTTPRequestHandler):
         models = self._ordered_models(tier, model_session_id=model_session_id)
         first_model = models[0]
         last_exc = None
+        interruption_retries = 0  # 中断后切模型重试的累计次数
 
         for model in models:
             sent_any = False
@@ -1357,18 +1362,43 @@ class handler(BaseHTTPRequestHandler):
                     "currentModel": status["model"],
                     "modelOrder": models,
                     "exhaustedModels": status["exhaustedModels"],
+                    "interruptionRetries": interruption_retries,
                 }
             except Exception as exc:
+                last_exc = exc
+
                 if sent_any:
-                    raise StreamingTranslationInterrupted(str(exc)) from exc
+                    # 已经向前端发过 delta：通知客户端丢弃当前 chunk 的累积，
+                    # 然后切下一个模型从头重试。
+                    if interruption_retries >= self.STREAM_INTERRUPTION_MAX_RETRIES:
+                        # 已经重试到上限，放弃流式、让外层走 sensitive/google 兜底。
+                        raise StreamingTranslationInterrupted(str(exc)) from exc
+
+                    interruption_retries += 1
+                    self._send_sse_event("restart", {
+                        "reason": "stream_interrupted",
+                        "message": friendly_provider_error(exc),
+                        "failedModel": model,
+                        "attempt": interruption_retries,
+                        "maxAttempts": self.STREAM_INTERRUPTION_MAX_RETRIES,
+                    })
+                    # 配额错误顺便标记耗尽，下次轮换跳过
+                    if is_quota_error(exc):
+                        self._mark_model_exhausted(tier, model)
+                    continue
+
+                # 还没发过 delta 的失败：正常按之前的规则处理
                 if is_quota_error(exc):
-                    last_exc = exc
                     self._mark_model_exhausted(tier, model)
                     continue
-                last_exc = exc
                 raise
 
+        # 所有模型都试过仍然失败
         if last_exc:
+            # 若最后一次是中断且尚未达到 raise StreamingTranslationInterrupted 的分支，
+            # 包装一下让外层 _handle_translate_stream 走兜底路径
+            if interruption_retries > 0:
+                raise StreamingTranslationInterrupted(str(last_exc)) from last_exc
             raise last_exc
         raise RuntimeError("没有可用模型")
 
@@ -1412,13 +1442,34 @@ class handler(BaseHTTPRequestHandler):
                 **meta,
             })
         except StreamingTranslationInterrupted as exc:
-            self._send_sse_event("error", {
-                "error": {
-                    "code": "STREAM_INTERRUPTED",
-                    "message": friendly_provider_error(exc),
-                    "action": ERROR_ACTION,
-                }
+            # 流式翻译在多次切换模型后仍然中断。先通知前端清空累积，
+            # 然后落到敏感兜底 / Google 兜底，让客户端最终拿到一段完整结果。
+            self._send_sse_event("restart", {
+                "reason": "stream_exhausted",
+                "message": friendly_provider_error(exc),
             })
+            try:
+                translated, meta = run_sensitive_fallback_models(
+                    client, chunk, index, total, previous, glossary or [],
+                )
+                self._send_sse_event("delta", {"delta": str(translated)})
+                self._send_sse_event("done", {
+                    "ok": True,
+                    "translated": str(translated),
+                    "note": "此 chunk 已切换兼容模型完成翻译",
+                    **meta,
+                })
+            except Exception:
+                translated = translate_by_google_split_with_glossary(chunk, glossary or [])
+                self._send_sse_event("delta", {"delta": str(translated)})
+                self._send_sse_event("done", {
+                    "ok": True,
+                    "translated": str(translated),
+                    "fallback": True,
+                    "fallbackType": "google",
+                    "note": "此 chunk 使用了机械翻译",
+                    "modelOrder": self._ordered_models(tier, model_session_id=model_session_id),
+                })
         except Exception:
             try:
                 translated, meta = run_sensitive_fallback_models(
